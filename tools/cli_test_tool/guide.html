@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Snapmaker CLI Slicing Test Tool - User Guide</title>
+<style>
+:root{--bg:#f0f0f3;--surface:#fff;--border:#d1d1d6;--primary:#0071e3;--text:#1d1d1f;--text2:#86868b;--code-bg:#1e1e2e;--code-text:#cdd6f4;--r:8px}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);line-height:1.6;font-size:15px}
+.container{max-width:860px;margin:0 auto;padding:32px 20px 80px}
+h1{font-size:28px;font-weight:700;margin-bottom:4px}
+h2{font-size:20px;font-weight:700;margin-top:40px;margin-bottom:12px;padding-bottom:6px;border-bottom:2px solid var(--border)}
+h3{font-size:16px;font-weight:600;margin-top:24px;margin-bottom:8px}
+p{margin-bottom:10px}
+.subtitle{color:var(--text2);font-size:15px;margin-bottom:24px}
+code{font-family:'Cascadia Code','Consolas',monospace;background:#e8e8ed;padding:2px 6px;border-radius:4px;font-size:13px}
+.code-block{background:var(--code-bg);color:var(--code-text);border-radius:var(--r);padding:16px 20px;font-family:'Cascadia Code','Consolas',monospace;font-size:13px;line-height:1.6;overflow-x:auto;margin:10px 0 16px;white-space:pre-wrap}
+.card{background:var(--surface);border-radius:var(--r);box-shadow:0 1px 3px rgba(0,0,0,.08);padding:20px;margin-bottom:16px}
+.toc{background:var(--surface);border-radius:var(--r);box-shadow:0 1px 3px rgba(0,0,0,.08);padding:20px;margin-bottom:32px}
+.toc ol{list-style:none;counter-reset:toc}
+.toc li{counter-increment:toc;padding:4px 0}
+.toc li::before{content:counter(toc) ". ";font-weight:700;color:var(--primary);margin-right:8px}
+.toc a{color:var(--text);text-decoration:none}
+.toc a:hover{color:var(--primary)}
+.badge{display:inline-block;padding:2px 10px;border-radius:4px;font-size:12px;font-weight:600;color:#fff;margin-right:4px}
+.badge-s{background:#34c759}.badge-f{background:#ff3b30}.badge-t{background:#ff9500}.badge-c{background:#af52de}.badge-k{background:#8e8e93}
+ul{margin-left:20px;margin-bottom:12px}
+li{margin-bottom:6px}
+.note{background:#e8f4ff;border-left:4px solid var(--primary);padding:12px 16px;border-radius:0 6px 6px 0;margin:12px 0;font-size:14px}
+.warn{background:#fff9e6;border-left:4px solid #ff9500;padding:12px 16px;border-radius:0 6px 6px 0;margin:12px 0;font-size:14px}
+.feature-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:12px 0}
+.feature-item{background:var(--surface);border-radius:6px;padding:14px;border:1px solid var(--border)}
+.feature-item h4{font-size:14px;margin-bottom:4px}
+.feature-item p{font-size:13px;color:var(--text2);margin:0}
+table{width:100%;border-collapse:collapse;margin:10px 0}
+th{padding:8px 12px;text-align:left;font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:var(--text2);border-bottom:2px solid var(--border)}
+td{padding:8px 12px;font-size:14px;border-bottom:1px solid #f0f0f3}
+.step{display:flex;gap:12px;align-items:flex-start;margin-bottom:10px}
+.step-num{background:var(--primary);color:#fff;width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;flex-shrink:0;margin-top:2px}
+.step-content{flex:1}
+.step-content p{margin:0}
+</style>
+</head>
+<body>
+<div class="container">
+<h1>Snapmaker CLI Slicing Test Tool</h1>
+<p class="subtitle">Batch 3MF slicing test tool with real-time progress, detailed logs, failure analysis, and quality reports.</p>
+
+<div class="toc">
+<h3>Contents</h3>
+<ol>
+<li><a href="#quick-start">Quick Start</a></li>
+<li><a href="#config">Configuration</a></li>
+<li><a href="#workflow">Basic Workflow</a></li>
+<li><a href="#advanced">Advanced Options</a></li>
+<li><a href="#results">Slice Results Dashboard</a></li>
+<li><a href="#quality">Quality Reports</a></li>
+<li><a href="#export">Export and Reports</a></li>
+<li><a href="#troubleshoot">Troubleshooting</a></li>
+</ol>
+</div>
+
+<h2 id="quick-start">Quick Start</h2>
+<div class="card">
+<div class="step"><div class="step-num">1</div><div class="step-content"><p>Ensure <strong>Python 3.8+</strong> is installed. Run <code>python --version</code> to check.</p></div></div>
+<div class="step"><div class="step-num">2</div><div class="step-content"><p>Double-click <code>start.bat</code>, or run in terminal:</p></div></div>
+<div class="code-block">python tools/cli_test_tool/app.py</div>
+<div class="step"><div class="step-num">3</div><div class="step-content"><p>Browser opens automatically at <code>http://127.0.0.1:18964</code>. The interface is in Chinese by default.</p></div></div>
+</div>
+<div class="note">The tool auto-detects the CLI binary (<code>snapmaker-orca-cli.exe</code>) from the build output directory. If not found, a warning banner appears.</div>
+
+<h2 id="config">Configuration</h2>
+<p>In the Settings panel (click the header to collapse/expand):</p>
+<div class="card">
+<table>
+<tr><th>Field</th><th>Description</th></tr>
+<tr><td><strong>CLI Path</strong></td><td>Path to <code>snapmaker-orca-cli.exe</code>. Auto-detected from <code>build/src/Release/</code>. Use Browse to pick manually.</td></tr>
+<tr><td><strong>Data Directory</strong></td><td>Path to the <code>resources/</code> folder. Contains printer profiles, fonts, etc.</td></tr>
+<tr><td><strong>Output Directory</strong></td><td>Where G-code files and quality reports are saved. Defaults to <code>slice_output</code>.</td></tr>
+</table>
+</div>
+
+<h2 id="workflow">Basic Workflow</h2>
+<div class="card">
+<div class="step"><div class="step-num">1</div><div class="step-content"><p><strong>Select input</strong> - Enter a path to a single <code>.3mf</code> file or a directory. Use File or Folder browse buttons.</p></div></div>
+<div class="step"><div class="step-num">2</div><div class="step-content"><p><strong>Scan</strong> - Click "Scan 3MF Files" to discover all <code>.3mf</code> files. Uncheck any you want to skip.</p></div></div>
+<div class="step"><div class="step-num">3</div><div class="step-content"><p><strong>Start Slicing</strong> - Click "Start Slicing". A live progress bar shows "N / Total (X%)" and the current file.</p></div></div>
+<div class="step"><div class="step-num">4</div><div class="step-content"><p><strong>Review</strong> - Results appear as cards in real-time with status, duration, exit code, logs, and error analysis.</p></div></div>
+<div class="step"><div class="step-num">5</div><div class="step-content"><p><strong>Quality Reports</strong> - Switch to the Quality Reports tab to see G-code quality scores. Click any row for a detailed report.</p></div></div>
+<div class="step"><div class="step-num">6</div><div class="step-content"><p><strong>Export</strong> - Click "Export Report" to download a standalone HTML summary.</p></div></div>
+</div>
+
+<h2 id="advanced">Advanced Options</h2>
+<p>Click "Advanced Options" in the Settings panel to expand:</p>
+<div class="card">
+<table>
+<tr><th>Option</th><th>Default</th><th>Description</th></tr>
+<tr><td>Slice Mode</td><td>All plates (0)</td><td>Which plate to slice: 0 = all, 1-3 = specific plate.</td></tr>
+<tr><td>Max Time/Plate (s)</td><td>0</td><td><code>--mstpp</code> - Maximum slicing time per plate. 0 = unlimited.</td></tr>
+<tr><td>Max Triangles</td><td>0</td><td><code>--mtcpp</code> - Maximum triangle count. 0 = unlimited.</td></tr>
+<tr><td>Debug Level</td><td>3</td><td>0 (errors only) to 5 (full trace). Higher = more verbose output.</td></tr>
+<tr><td>Timeout (s)</td><td>600</td><td>Wall-clock limit per file. Files exceeding this are marked TIMEOUT.</td></tr>
+<tr><td>Extra Args</td><td>(empty)</td><td>Any additional CLI flags, e.g. <code>--no-check --orient 1</code>.</td></tr>
+<tr><td>Allow Newer File</td><td>Checked</td><td>Adds <code>--allow-newer-file</code> to skip version mismatch.</td></tr>
+<tr><td>Use Relative E=0</td><td>Unchecked</td><td>Adds <code>--use-relative-e-distances=0</code>. Fixes "relative extruder error" on some 3MF files.</td></tr>
+</table>
+</div>
+<div class="warn">If you see <code>relative extruder error</code> in the logs, enable "Use Relative E=0" in Advanced Options.</div>
+
+<h2 id="results">Slice Results Dashboard</h2>
+<p>The Slice Results tab shows:</p>
+<div class="feature-grid">
+<div class="feature-item"><h4>Statistics</h4><p>Total / Success / Failed / Timeout / Crashed counts, success rate, total time.</p></div>
+<div class="feature-item"><h4>Filters</h4><p>Filter cards by status: All, Success, Failed, Timeout, Crashed, Skipped.</p></div>
+<div class="feature-item"><h4>Per-File Cards</h4><p>Each 3MF gets a card with status badge, duration, exit code, G-code paths.</p></div>
+<div class="feature-item"><h4>Error Analysis</h4><p>Automatic failure reason detection with suggestions and keyword highlights.</p></div>
+<div class="feature-item"><h4>Log Summary</h4><p>Key log lines auto-extracted - warnings, errors, milestones. Collapsible.</p></div>
+<div class="feature-item"><h4>Full Log</h4><p>Complete CLI output, collapsible. Dark terminal theme.</p></div>
+<div class="feature-item"><h4>Live Progress</h4><p>Per-card progress bar during slicing, with percentage and stage label.</p></div>
+<div class="feature-item"><h4>Quality Badges</h4><p>Click quality score badges on each card to open detailed reports.</p></div>
+</div>
+
+<h3>Status Types</h3>
+<p>
+<span class="badge badge-s">SUCCESS</span> CLI exited code 0 and produced G-code.
+<span class="badge badge-f">FAILED</span> CLI exited non-zero.
+<span class="badge badge-t">TIMEOUT</span> Exceeded the timeout.
+<span class="badge badge-c">CRASHED</span> CLI process crashed (segfault).
+<span class="badge badge-k">SKIPPED</span> File was excluded or already done.
+</p>
+
+<h2 id="quality">Quality Reports</h2>
+<p>The tool integrates <strong>gcode-diff</strong> - a Rust-based G-code quality analysis engine. After each successful slice, it scores the output across 18 dimensions:</p>
+<div class="card">
+<table>
+<tr><th>Category</th><th>Dimensions</th></tr>
+<tr><td>Cooling</td><td>Fan PWM range, part cooling commands</td></tr>
+<tr><td>Extrusion</td><td>Retraction, extrusion uniformity, volumetric flow</td></tr>
+<tr><td>Temperature</td><td>Nozzle temp range, temperature stability</td></tr>
+<tr><td>Geometry</td><td>Layer height, overhang, print volume fit, first layer</td></tr>
+<tr><td>Motion</td><td>Travel efficiency, speed consistency, corner speed</td></tr>
+<tr><td>Structure</td><td>Wall and shell, support ratio, layer consistency</td></tr>
+<tr><td>Thermal Physics</td><td>Min layer time, weld bond strength (de Gennes/Wool model)</td></tr>
+<tr><td>Multi-Extruder</td><td>Tool changes, purge blocks, wipe tower workflow</td></tr>
+</table>
+</div>
+
+<h3>How to Use</h3>
+<ul>
+<li>Switch to the <strong>Quality Reports</strong> tab after slicing completes.</li>
+<li>A summary table shows each G-code file's score, rating (Excellent/Good/Fair/Poor), and CRITICAL flag.</li>
+<li>Click any row to open a <strong>full-screen detailed report</strong> with per-dimension breakdown, physics status, and recommendations.</li>
+<li>Use the language toggle button (top-right) to switch between Chinese and English. Defaults to Chinese.</li>
+<li>Use the back button (top-left) or close button to dismiss.</li>
+<li>Quality badges also appear on result cards in the Slice Results tab.</li>
+</ul>
+
+<h3>Score Interpretation</h3>
+<div class="card">
+<table>
+<tr><th>Score</th><th>Rating</th><th>Meaning</th></tr>
+<tr><td style="color:#34c759;font-weight:700">80-100</td><td>Excellent / Good</td><td>Print quality expected to be high.</td></tr>
+<tr><td style="color:#ff9500;font-weight:700">60-79</td><td>Fair</td><td>Some issues may affect surface or accuracy.</td></tr>
+<tr><td style="color:#ff3b30;font-weight:700">0-59</td><td>Poor</td><td>Significant issues - review recommendations.</td></tr>
+</table>
+</div>
+
+<h2 id="export">Export and Reports</h2>
+<ul>
+<li><strong>Export Report</strong> - Click after slicing to download a standalone HTML summary with all results and logs.</li>
+<li><strong>Output Structure</strong>:
+<div class="code-block">output_dir/
+  _reports/
+    report_20260729_143000.json     # session report
+  3mf_file_name/
+    plate_1.gcode                    # sliced G-code
+    quality_plate_1.html             # quality report (per plate)</div>
+</li>
+<li><strong>Clear Session</strong> - Click "Clear" to reset all results and start fresh.</li>
+</ul>
+
+<h2 id="troubleshoot">Troubleshooting</h2>
+<div class="card">
+<h3>CLI not found</h3>
+<p>An orange warning banner appears if <code>snapmaker-orca-cli.exe</code> cannot be found. Use Browse in Settings to locate it. Expected path: <code>build/src/Release/</code>.</p>
+<h3>All files show CRASHED</h3>
+<p>Usually a CLI runtime issue. Check: data directory path is correct, all required DLLs are next to the exe, binary was built in Release mode.</p>
+<h3>Relative extruder error</h3>
+<p>Enable "Use Relative E=0" in Advanced Options.</p>
+<h3>Browse button not working</h3>
+<p>Type paths directly into the text fields. Use forward slashes or backslashes.</p>
+<h3>Port already in use</h3>
+<p>Kill the process on port 18964, or modify the PORT variable at the top of <code>app.py</code>.</p>
+</div>
+
+<div class="note" style="margin-top:32px">
+<strong>Tech Stack:</strong> Python 3.8+ standard library (zero dependencies), vanilla HTML/CSS/JS frontend, gcode-diff Rust quality engine, optional Electron packaging.
+</div>
+
+</div>
+</body>
+</html>

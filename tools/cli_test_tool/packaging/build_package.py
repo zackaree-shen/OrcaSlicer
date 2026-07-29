@@ -59,6 +59,18 @@ with zipfile.ZipFile(str(OUTPUT), "w", zipfile.ZIP_DEFLATED) as zf:
         zf.write(str(readme), "tools/cli_test_tool/README.md")
         print("  Added README.md")
 
+    # 3c. Translator module (template-based CN translation for quality reports)
+    translator_py = TOOL_DIR / "translator.py"
+    if translator_py.exists():
+        zf.write(str(translator_py), "tools/cli_test_tool/translator.py")
+        print("  Added translator.py")
+
+    # 3d. HTML user guide
+    guide = TOOL_DIR / "guide.html"
+    if guide.exists():
+        zf.write(str(guide), "tools/cli_test_tool/guide.html")
+        print("  Added guide.html")
+
     # 3b. gcode-diff quality scoring engine
     if GCODE_DIFF.exists():
         zf.write(str(GCODE_DIFF), "tools/gcode-diff.exe")
