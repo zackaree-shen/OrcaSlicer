@@ -8,3 +8,7 @@ _patch_*.py
 # Packaging output (too large for git)
 packaging/Snapmaker-CLI-Package-*.zip
 packaging/build/
+__pycache__/
+*.pyc
+tool.log
+.planning/

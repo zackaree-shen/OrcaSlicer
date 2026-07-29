@@ -8,6 +8,7 @@ import subprocess, threading, time, traceback, webbrowser
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
+import translator
 
 PORT = 18964
 HERE = Path(__file__).resolve().parent
@@ -460,83 +461,13 @@ def _generate_quality_html(data, gcode_name):
         "Verified": "\u5df2\u9a8c\u8bc1", "Unverified": "\u672a\u9a8c\u8bc1",
         "Partially verified": "\u90e8\u5206\u9a8c\u8bc1",
     }
-    _PHRASES_CN = {
-        "Fan PWM low for PLA": "PLA \u98ce\u6247 PWM \u504f\u4f4e",
-        "Increase part cooling fan speed": "\u63d0\u9ad8\u90e8\u4ef6\u51b7\u5374\u98ce\u6247\u8f6c\u901f",
-        "Extremely high retraction density": "\u56de\u62bd\u5bc6\u5ea6\u6781\u9ad8",
-        "Slicer profile has incorrect retraction settings": "\u5207\u7247\u914d\u7f6e\u6587\u4ef6\u7684\u56de\u62bd\u8bbe\u7f6e\u6709\u8bef",
-        "Extruder temperature within recommended range": "\u6324\u51fa\u5934\u6e29\u5ea6\u5728\u63a8\u8350\u8303\u56f4\u5185",
-        "Outer wall extrusion consistent": "\u5916\u5899\u6324\u51fa\u4e00\u81f4",
-        "Wall loops and shell layers adequate": "\u5899\u58c1\u5708\u6570\u548c\u5916\u58f3\u5c42\u6570\u5145\u8db3",
-        "Model fits within configured bed": "\u6a21\u578b\u9002\u914d\u914d\u7f6e\u7684\u6253\u5370\u5e8a",
-        "Speed consistent across layers": "\u5404\u5c42\u901f\u5ea6\u4e00\u81f4",
-        "cannot verify from motion data": "\u65e0\u6cd5\u4ece\u8fd0\u52a8\u6570\u636e\u9a8c\u8bc1",
-        "Temperature stable across print": "\u6253\u5370\u8fc7\u7a0b\u4e2d\u6e29\u5ea6\u7a33\u5b9a",
-        "Flow exceeds hotend capacity": "\u6d41\u91cf\u8d85\u51fa\u70ed\u7aef\u80fd\u529b",
-        "reduce speed or increase temperature": "\u964d\u4f4e\u901f\u5ea6\u6216\u63d0\u9ad8\u6e29\u5ea6",
-        "Increase minimum layer time or reduce speed": "\u589e\u52a0\u6700\u5c0f\u5c42\u65f6\u95f4\u6216\u964d\u4f4e\u901f\u5ea6",
-        "Reduce overhang angle, add support, or increase cooling": "\u51cf\u5c0f\u60ac\u5782\u89d2\u5ea6\u3001\u6dfb\u52a0\u652f\u6491\u6216\u589e\u5f3a\u51b7\u5374",
-        "overhangs above this should have support": "\u8d85\u8fc7\u6b64\u89d2\u5ea6\u7684\u60ac\u5782\u5e94\u6dfb\u52a0\u652f\u6491",
-        "Smooth speed profile - low ringing risk": "\u901f\u5ea6\u66f2\u7ebf\u5e73\u6ed1 - \u632f\u7eb9\u98ce\u9669\u4f4e",
-        "Layer count matches declared": "\u5c42\u6570\u4e0e\u58f0\u660e\u4e00\u81f4",
-        # Verdict phrases with data placeholders (matched as substrings)
-        "Travel ratio:": "\u7a7a\u9a76\u6bd4: ",
-        "acceptable": "\u53ef\u63a5\u53d7",
-        "in typical range": "\u5728\u5178\u578b\u8303\u56f4\u5185",
-        "Layer height": "\u5c42\u9ad8",
-        "declared": "\u58f0\u660e",
-        "First layer height:": "\u9996\u5c42\u9ad8:",
-        "Peak layer flow": "\u5cf0\u503c\u5c42\u6d41\u91cf",
-        "hotend limit": "\u70ed\u7aef\u6781\u9650",
-        "nozzle": "\u55b7\u5634",
-        "from header": "\u6765\u81ea\u6587\u4ef6\u5934",
-        "by 30%": "30%",
-        "std=0C, first layer excluded": "\u6807\u51c6\u5dee=0\u2103\uff0c\u5df2\u6392\u9664\u9996\u5c42",
-        "pred T_sub": "\u9884\u6d4b T_sub",
-        "Support": "\u652f\u6491",
-        "of extrusion": "\u6324\u51fa\u91cf",
-        "moderate": "\u9002\u4e2d",
-        "layers below": "\u5c42\u4f4e\u4e8e",
-        "bond": "\u7ed3\u5408",
-        "at worst layer": "\u6700\u5dee\u5c42",
-        "de Gennes/Wool t^(1/4)": "de Gennes/Wool t^(1/4)",
-        "slicer slow_down_layer_time": "\u5207\u7247 slow_down_layer_time",
-        "slow_down_layer_time": "slow_down_layer_time",
-        "slicer allows faster printing than bond strength requires": "\u5207\u7247\u5141\u8bb8\u6bd4\u7ed3\u5408\u5f3a\u5ea6\u8981\u6c42\u66f4\u5feb\u7684\u6253\u5370",
-        "material safe minimum": "\u6750\u6599\u5b89\u5168\u6700\u5c0f\u503c",
-        "Worst overhang": "\u6700\u5927\u60ac\u5782",
-        "rule": "\u89c4\u5219",
-        "points unsupported": "\u70b9\u672a\u88ab\u652f\u6491",
-        "slicer support threshold": "\u5207\u7247\u652f\u6491\u9608\u503c",
-        "tool changes": "\u6362\u8272\u6b21\u6570",
-        "multi": "\u591a\u8272",
-        "per layer": "\u6bcf\u5c42",
-        "max burst": "\u6700\u5927\u8fde\u53d1",
-        "wipe-tower workflow": "\u64e6\u5854\u5de5\u4f5c\u6d41",
-        "clean transitions": "\u5e72\u51c0\u7684\u6362\u8272",
-        "detected": "\u68c0\u6d4b\u5230",
-        "on layer": "\u5728\u7b2c",
-        # layer alone omitted to avoid breaking slow_down_layer_time
-        "/layer": "/\u5c42",
-        "(multi,": "(\u591a\u8272,",
-        "of extrusion - moderate": "\u6324\u51fa\u91cf - \u9002\u4e2d",
-    }
-
-    def _cn(text):
-        if not text:
-            return text
-        result = text
-        for en in sorted(_PHRASES_CN.keys(), key=lambda x: -len(x)):
-            result = result.replace(en, _PHRASES_CN[en])
-        return result
-
+   # Translation handled by translator.translate() module
     if score >= 80:
         sc = "#34c759"
     elif score >= 60:
         sc = "#ff9500"
     else:
         sc = "#ff3b30"
-
     rows = ""
     for d in dimensions:
         ds = d.get("score", 0)
@@ -551,20 +482,18 @@ def _generate_quality_html(data, gcode_name):
         en_sev = d.get("severity", "")
         cn_sev = _SEV_CN.get(en_sev, en_sev)
         en_verdict = str(d.get("verdict", ""))
-        cn_verdict = _cn(en_verdict)
+        cn_verdict = translator.translate(en_verdict)
         en_rec = str(d.get("recommendation", ""))
-        cn_rec = _cn(en_rec)
+        cn_rec = translator.translate(en_rec)
         rows += "<tr><td><span class='cn'>" + cn_name + "</span><span class='en hidden'>" + en_name + "</span></td>"
         rows += "<td style='text-align:center;font-weight:700;color:" + dc + "'>" + ds_str + "</td>"
         rows += "<td><span class='cn'>" + cn_sev + "</span><span class='en hidden'>" + en_sev + "</span></td>"
         rows += "<td><span class='cn'>" + cn_verdict + "</span><span class='en hidden'>" + en_verdict + "</span></td>"
         rows += "<td><span class='cn'>" + cn_rec + "</span><span class='en hidden'>" + en_rec + "</span></td></tr>"
-
     cn_summary = _SUMMARY_CN.get(summary, summary)
     cn_physics = _META_CN.get(physics_trust, physics_trust)
     cn_crit = "\u4e25\u91cd\u95ee\u9898" if has_critical else ""
     en_crit = "CRITICAL" if has_critical else ""
-
     p = []
     p.append("<!DOCTYPE html><html lang='zh-CN'><head><meta charset='utf-8'>")
     p.append("<title>\u8d28\u91cf\u62a5\u544a - " + gcode_name + "</title>")
@@ -623,6 +552,7 @@ def _generate_quality_html(data, gcode_name):
     p.append("<tbody>" + rows + "</tbody></table>")
     p.append("</body></html>")
     return "\n".join(p)
+
 
 # ---------------------------------------------------------------------------
 # Per-file report generation
