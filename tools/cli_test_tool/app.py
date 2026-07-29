@@ -14,16 +14,40 @@ PORT = 18964
 HERE = Path(__file__).resolve().parent
 PROJECT_ROOT = HERE.parent.parent
 
+def _is_packaged():
+    """Detect if running from a packaged zip (no git repo, CLI at root)."""
+    return not (PROJECT_ROOT / ".git").exists()
+
+def _detect_defaults():
+    """Auto-detect CLI path, datadir, and gcode-diff for dev or packaged env."""
+    if _is_packaged():
+        # Packaged: CLI at root, resources/ at root, gcode-diff in tools/
+        cli = str(PROJECT_ROOT / "snapmaker-orca.exe")
+        datadir = str(PROJECT_ROOT / "resources")
+    else:
+        # Dev: standard build paths
+        cli = r"build/src/Release/snapmaker-orca.exe"
+        datadir = r"resources"
+    return cli, datadir
+
 def _resolve(path_str):
-    """Resolve a relative path against PROJECT_ROOT; absolute paths pass through."""
+    """Resolve a relative path against PROJECT_ROOT (dev) or HERE.parent.parent (packaged)."""
     p = Path(str(path_str))
     if p.is_absolute():
         return str(p.resolve())
     return str((PROJECT_ROOT / p).resolve())
 
-DEFAULT_CLI_PATH = r"build/src/Release/snapmaker-orca.exe"
-DEFAULT_DATADIR = r"resources"
+DEFAULT_CLI_PATH, DEFAULT_DATADIR = _detect_defaults()
 TOOL_LOG_PATH = HERE / "tool.log"
+
+def _decode_cli(raw_bytes):
+    """Decode CLI output bytes, trying UTF-8 then system codepage."""
+    try:
+        return raw_bytes.decode("utf-8")
+    except (UnicodeDecodeError, AttributeError):
+        import locale
+        enc = locale.getpreferredencoding(False) or "utf-8"
+        return raw_bytes.decode(enc, errors="replace")
 
 # ---------------------------------------------------------------------------
 # CLI binary diagnostics (run once at startup)
@@ -57,7 +81,10 @@ def cli_binary_diagnostic(cli_path=None):
         _CLI_DIAG_CACHE = (False, "Binary check failed: " + str(ex))
         return _CLI_DIAG_CACHE
 
-    # Check binary timestamp vs. latest commit in repo
+   # Check binary timestamp vs. latest commit in repo
+    if _is_packaged():
+        _CLI_DIAG_CACHE = (True, "Binary OK (packaged mode).")
+        return _CLI_DIAG_CACHE
     try:
         mod_ts = exe_path.stat().st_mtime
         mod_time = datetime.datetime.fromtimestamp(mod_ts)
@@ -398,9 +425,10 @@ def _run_gcode_score(gcode_path, out_dir):
     json_out = str(Path(out_dir) / f"quality_{gcode_name}.json")
     try:
         r = subprocess.run(
-            [GCODE_DIFF_PATH, "--score", gcode_path, "--format", "json", "--no-overhang-viz"],
-            capture_output=True, text=True, timeout=120,
-            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        [GCODE_DIFF_PATH, "--score", gcode_path, "--format", "json", "--no-overhang-viz"],
+        capture_output=True, text=True, timeout=120,
+        encoding="utf-8", errors="replace",
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
         )
         # gcode-diff exits 0 (pass) or 2 (below threshold) -- both mean it ran successfully
         if r.returncode not in (0, 2):
@@ -671,6 +699,8 @@ def _do_slice_subprocess(result, config, out_dir):
     env = os.environ.copy()
     cli_dir = str(Path(_resolve(config["cli_path"])).parent)
     env["PATH"] = cli_dir + os.pathsep + env.get("PATH", "")
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["LANG"] = "en_US.UTF-8"
     if config.get("allow_newer_file", True):
         env["SNAPMAKER_ORCA_ALLOW_NEWER_FILE"] = "1"
     cmd_display = " ".join(f'"{a}"' if " " in a else a for a in cmd)
@@ -711,7 +741,7 @@ def _do_slice_subprocess(result, config, out_dir):
                 continue
             if raw is None:
                 break
-            line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+            line = _decode_cli(raw).rstrip("\r\n")
             result.log_lines.append(line)
             session.live_log.append(line)
             # Stage detection
