@@ -71,6 +71,13 @@ with zipfile.ZipFile(str(OUTPUT), "w", zipfile.ZIP_DEFLATED) as zf:
         zf.write(str(guide), "tools/cli_test_tool/guide.html")
         print("  Added guide.html")
 
+    # 3e. Bilingual guides
+    for gname in ("guide_zh.html", "guide_en.html"):
+        gpath = TOOL_DIR / gname
+        if gpath.exists():
+            zf.write(str(gpath), "tools/cli_test_tool/" + gname)
+            print(f"  Added {gname}")
+
     # 3b. gcode-diff quality scoring engine
     if GCODE_DIFF.exists():
         zf.write(str(GCODE_DIFF), "tools/gcode-diff.exe")

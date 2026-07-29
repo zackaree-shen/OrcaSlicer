@@ -1,0 +1,205 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Snapmaker CLI 切片测试工具 - 使用教程</title>
+<style>
+:root{--bg:#f0f0f3;--surface:#fff;--border:#d1d1d6;--primary:#0071e3;--text:#1d1d1f;--text2:#86868b;--code-bg:#1e1e2e;--code-text:#cdd6f4;--r:8px}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);line-height:1.6;font-size:15px}
+.container{max-width:860px;margin:0 auto;padding:32px 20px 80px}
+h1{font-size:28px;font-weight:700;margin-bottom:4px}
+h2{font-size:20px;font-weight:700;margin-top:40px;margin-bottom:12px;padding-bottom:6px;border-bottom:2px solid var(--border)}
+h3{font-size:16px;font-weight:600;margin-top:24px;margin-bottom:8px}
+p{margin-bottom:10px}
+.subtitle{color:var(--text2);font-size:15px;margin-bottom:24px}
+.lang-link{float:right;font-size:14px;color:var(--primary);text-decoration:none;margin-top:8px}
+code{font-family:'Cascadia Code','Consolas',monospace;background:#e8e8ed;padding:2px 6px;border-radius:4px;font-size:13px}
+.code-block{background:var(--code-bg);color:var(--code-text);border-radius:var(--r);padding:16px 20px;font-family:'Cascadia Code','Consolas',monospace;font-size:13px;line-height:1.6;overflow-x:auto;margin:10px 0 16px;white-space:pre-wrap}
+.card{background:var(--surface);border-radius:var(--r);box-shadow:0 1px 3px rgba(0,0,0,.08);padding:20px;margin-bottom:16px}
+.toc{background:var(--surface);border-radius:var(--r);box-shadow:0 1px 3px rgba(0,0,0,.08);padding:20px;margin-bottom:32px}
+.toc ol{list-style:none;counter-reset:toc}
+.toc li{counter-increment:toc;padding:4px 0}
+.toc li::before{content:counter(toc) ". ";font-weight:700;color:var(--primary);margin-right:8px}
+.toc a{color:var(--text);text-decoration:none}
+.toc a:hover{color:var(--primary)}
+.badge{display:inline-block;padding:2px 10px;border-radius:4px;font-size:12px;font-weight:600;color:#fff;margin-right:4px}
+.badge-s{background:#34c759}.badge-f{background:#ff3b30}.badge-t{background:#ff9500}.badge-c{background:#af52de}.badge-k{background:#8e8e93}
+ul{margin-left:20px;margin-bottom:12px}
+li{margin-bottom:6px}
+.note{background:#e8f4ff;border-left:4px solid var(--primary);padding:12px 16px;border-radius:0 6px 6px 0;margin:12px 0;font-size:14px}
+.warn{background:#fff9e6;border-left:4px solid #ff9500;padding:12px 16px;border-radius:0 6px 6px 0;margin:12px 0;font-size:14px}
+.feature-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:12px 0}
+.feature-item{background:var(--surface);border-radius:6px;padding:14px;border:1px solid var(--border)}
+.feature-item h4{font-size:14px;margin-bottom:4px}
+.feature-item p{font-size:13px;color:var(--text2);margin:0}
+table{width:100%;border-collapse:collapse;margin:10px 0}
+th{padding:8px 12px;text-align:left;font-size:12px;color:var(--text2);border-bottom:2px solid var(--border)}
+td{padding:8px 12px;font-size:14px;border-bottom:1px solid #f0f0f3}
+.step{display:flex;gap:12px;align-items:flex-start;margin-bottom:10px}
+.step-num{background:var(--primary);color:#fff;width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;flex-shrink:0;margin-top:2px}
+.step-content{flex:1}
+.step-content p{margin:0}
+</style>
+</head>
+<body>
+<div class="container">
+<a class="lang-link" href="guide_en.html">English</a>
+<h1>Snapmaker CLI 切片测试工具</h1>
+<p class="subtitle">3MF 批量切片测试工具：实时进度、详细日志、失败分析、G-code 质量报告。</p>
+
+<div class="toc">
+<h3>目录</h3>
+<ol>
+<li><a href="#quick-start">快速上手</a></li>
+<li><a href="#config">基本配置</a></li>
+<li><a href="#workflow">使用流程</a></li>
+<li><a href="#advanced">高级选项</a></li>
+<li><a href="#results">切片结果面板</a></li>
+<li><a href="#quality">质量报告</a></li>
+<li><a href="#export">导出与报告</a></li>
+<li><a href="#troubleshoot">常见问题</a></li>
+</ol>
+</div>
+
+<h2 id="quick-start">快速上手</h2>
+<div class="card">
+<div class="step"><div class="step-num">1</div><div class="step-content"><p>确保已安装 <strong>Python 3.8+</strong>。运行 <code>python --version</code> 确认。</p></div></div>
+<div class="step"><div class="step-num">2</div><div class="step-content"><p>双击 <code>start.bat</code>，或在终端运行：</p></div></div>
+<div class="code-block">python tools/cli_test_tool/app.py</div>
+<div class="step"><div class="step-num">3</div><div class="step-content"><p>浏览器自动打开 <code>http://127.0.0.1:18964</code>。界面默认为中文。</p></div></div>
+</div>
+<div class="note">工具会自动检测 CLI 二进制文件（<code>snapmaker-orca-cli.exe</code>），默认从构建输出目录查找。如果未找到，会显示橙色警告条。</div>
+
+<h2 id="config">基本配置</h2>
+<p>在"设置"面板中（点击标题栏可折叠/展开）：</p>
+<div class="card">
+<table>
+<tr><th>字段</th><th>说明</th></tr>
+<tr><td><strong>CLI 路径</strong></td><td><code>snapmaker-orca-cli.exe</code> 的路径。默认从 <code>build/src/Release/</code> 自动检测。可点击"浏览"手动选择。</td></tr>
+<tr><td><strong>数据目录</strong></td><td><code>resources/</code> 目录路径。包含打印机配置文件、字体等。</td></tr>
+<tr><td><strong>输出目录</strong></td><td>G-code 文件和质量报告的保存位置。默认为 <code>slice_output</code>。</td></tr>
+</table>
+</div>
+
+<h2 id="workflow">使用流程</h2>
+<div class="card">
+<div class="step"><div class="step-num">1</div><div class="step-content"><p><strong>选择输入</strong> — 输入单个 <code>.3mf</code> 文件路径或包含多个 <code>.3mf</code> 的目录。可使用"文件"或"目录"浏览按钮。</p></div></div>
+<div class="step"><div class="step-num">2</div><div class="step-content"><p><strong>扫描</strong> — 点击"扫描 3MF 文件"发现所有 <code>.3mf</code> 文件。取消勾选不需要切片的文件。</p></div></div>
+<div class="step"><div class="step-num">3</div><div class="step-content"><p><strong>开始切片</strong> — 点击"开始切片"。实时进度条显示"N / 总数 (X%)"及当前正在切片的文件。</p></div></div>
+<div class="step"><div class="step-num">4</div><div class="step-content"><p><strong>查看结果</strong> — 切片结果以卡片形式实时显示，包含状态、耗时、退出码、日志和错误分析。</p></div></div>
+<div class="step"><div class="step-num">5</div><div class="step-content"><p><strong>质量报告</strong> — 切换到"质量报告"标签页查看 G-code 质量评分。点击任意行打开详细报告。</p></div></div>
+<div class="step"><div class="step-num">6</div><div class="step-content"><p><strong>导出</strong> — 点击"导出报告"下载独立的 HTML 汇总文件。</p></div></div>
+</div>
+
+<h2 id="advanced">高级选项</h2>
+<p>在设置面板中点击"高级选项"展开：</p>
+<div class="card">
+<table>
+<tr><th>选项</th><th>默认值</th><th>说明</th></tr>
+<tr><td>切片模式</td><td>所有盘 (0)</td><td>选择切片的盘：0 = 全部，1-3 = 指定盘。</td></tr>
+<tr><td>每盘最大时间(秒)</td><td>0</td><td><code>--mstpp</code> — 每个盘的最大切片时间。0 = 无限制。</td></tr>
+<tr><td>最大三角形数</td><td>0</td><td><code>--mtcpp</code> — 三角面片上限。0 = 无限制。适合压力测试大模型。</td></tr>
+<tr><td>调试级别</td><td>3</td><td>0（仅错误）到 5（完整跟踪）。越高输出越详细。</td></tr>
+<tr><td>超时(秒)</td><td>600</td><td>每个文件的墙钟时间限制。超时文件标记为 <span class="badge badge-t">超时</span>。</td></tr>
+<tr><td>额外参数</td><td>（空）</td><td>任意额外的 CLI 参数，如 <code>--no-check --orient 1</code>。</td></tr>
+<tr><td>跳过版本检查</td><td>勾选</td><td>添加 <code>--allow-newer-file</code>，跳过版本不匹配错误。</td></tr>
+<tr><td>Use Relative E=0</td><td>不勾选</td><td>添加 <code>--use-relative-e-distances=0</code>。修复部分 3MF 的"relative extruder error"。</td></tr>
+</table>
+</div>
+<div class="warn">如果在日志中看到 <code>relative extruder error</code>，请在高级选项中勾选"Use Relative E=0"。</div>
+
+<h2 id="results">切片结果面板</h2>
+<p>切片结果标签页包含以下功能：</p>
+<div class="feature-grid">
+<div class="feature-item"><h4>统计数据</h4><p>总计 / 成功 / 失败 / 超时 / 崩溃 数量，成功率，总耗时。</p></div>
+<div class="feature-item"><h4>状态筛选</h4><p>按状态筛选卡片：全部、成功、失败、超时、崩溃、跳过。</p></div>
+<div class="feature-item"><h4>每文件卡片</h4><p>每个 3MF 一张卡片，显示状态徽章、耗时、退出码、G-code 输出路径。</p></div>
+<div class="feature-item"><h4>错误分析</h4><p>自动检测失败原因，给出修复建议（黄色框）和关键词高亮。</p></div>
+<div class="feature-item"><h4>日志摘要</h4><p>自动提取关键日志行 — 警告、错误、重要里程碑。可折叠。</p></div>
+<div class="feature-item"><h4>完整日志</h4><p>完整的 CLI 输出，可折叠。深色终端主题，便于阅读。</p></div>
+<div class="feature-item"><h4>实时进度</h4><p>切片时在卡片内显示进度条，标注百分比和当前阶段。</p></div>
+<div class="feature-item"><h4>质量徽章</h4><p>点击卡片上的质量分数徽章，直接打开详细质量报告。</p></div>
+</div>
+
+<h3>状态类型</h3>
+<p>
+<span class="badge badge-s">成功</span> CLI 退出码为 0 且生成了 G-code。
+<span class="badge badge-f">失败</span> CLI 退出码非零。
+<span class="badge badge-t">超时</span> 超过了配置的超时时间。
+<span class="badge badge-c">崩溃</span> CLI 进程崩溃（段错误等异常终止）。
+<span class="badge badge-k">跳过</span> 文件被排除或已完成。
+</p>
+
+<h2 id="quality">质量报告</h2>
+<p>工具集成了 <strong>gcode-diff</strong> — 一个基于 Rust 的 G-code 质量分析引擎。每次切片成功后，自动对输出进行 18 个维度的评分：</p>
+<div class="card">
+<table>
+<tr><th>类别</th><th>维度</th></tr>
+<tr><td>冷却</td><td>风扇 PWM 范围、部件冷却指令</td></tr>
+<tr><td>挤出</td><td>回抽、挤出均匀性、体积流量</td></tr>
+<tr><td>温度</td><td>喷嘴温度范围、温度稳定性</td></tr>
+<tr><td>几何</td><td>层高、悬垂、打印体积适配、首层</td></tr>
+<tr><td>运动</td><td>空驶效率、速度一致性、拐角速度</td></tr>
+<tr><td>结构</td><td>墙壁与外壳、支撑比例、层一致性</td></tr>
+<tr><td>热物理</td><td>最小层时间、焊接结合强度（de Gennes/Wool 模型）</td></tr>
+<tr><td>多挤出头</td><td>换色次数、清仓块、擦塔工作流</td></tr>
+</table>
+</div>
+
+<h3>如何使用</h3>
+<ul>
+<li>切片完成后，切换到<strong>质量报告</strong>标签页。</li>
+<li>汇总表格显示每个 G-code 文件的评分、评级（优秀/良好/一般/较差）和严重问题标记。</li>
+<li>点击任意行打开<strong>全屏详细报告</strong>，包含：各维度分数与严重程度、判定说明、推荐参数调整、物理验证状态和材料各向异性信息。</li>
+<li>报告右上角有语言切换按钮（中文/English），默认中文。</li>
+<li>左上角有返回按钮，右上角有关闭按钮。</li>
+<li>切片结果面板的每个卡片上也会显示质量徽章。</li>
+</ul>
+
+<h3>评分解读</h3>
+<div class="card">
+<table>
+<tr><th>分数</th><th>评级</th><th>含义</th></tr>
+<tr><td style="color:#34c759;font-weight:700">80-100</td><td>优秀 / 良好</td><td>打印质量预期较高。</td></tr>
+<tr><td style="color:#ff9500;font-weight:700">60-79</td><td>一般</td><td>部分问题可能影响表面质量或尺寸精度。</td></tr>
+<tr><td style="color:#ff3b30;font-weight:700">0-59</td><td>较差</td><td>存在严重质量问题 — 请查看推荐建议。</td></tr>
+</table>
+</div>
+
+<h2 id="export">导出与报告</h2>
+<ul>
+<li><strong>导出报告</strong> — 切片完成后点击"导出报告"，下载包含所有结果和日志的独立 HTML 文件，可分享。</li>
+<li><strong>输出目录结构</strong>：
+<div class="code-block">output_dir/
+  _reports/
+    report_20260729_143000.json     # 会话报告（机器可读）
+  3mf_file_name/
+    plate_1.gcode                    # 切片生成的 G-code
+    quality_plate_1.html             # 质量报告（按盘生成）</div>
+</li>
+<li><strong>清空会话</strong> — 点击"清空"重置所有结果，重新开始。防止上次切片的残留数据影响新任务。</li>
+</ul>
+
+<h2 id="troubleshoot">常见问题</h2>
+<div class="card">
+<h3>找不到 CLI</h3>
+<p>如果找不到 <code>snapmaker-orca-cli.exe</code>，会显示橙色警告条。在设置中点击"浏览"手动定位。预期路径：<code>build/src/Release/</code>。</p>
+<h3>所有文件都崩溃</h3>
+<p>通常是 CLI 运行时问题。检查：数据目录路径正确、所有依赖 DLL 与 exe 在同一目录、CLI 为 Release 模式编译。</p>
+<h3>Relative extruder error</h3>
+<p>在高级选项中勾选"Use Relative E=0"。</p>
+<h3>浏览按钮无响应</h3>
+<p>可以直接在文本框中手动输入路径，使用正斜杠（<code>/</code>）或反斜杠（<code>\</code>）均可。</p>
+<h3>端口被占用</h3>
+<p>结束占用 18964 端口的进程，或修改 <code>app.py</code> 顶部的 <code>PORT</code> 变量。</p>
+</div>
+
+<div class="note" style="margin-top:32px">
+<strong>技术栈：</strong>Python 3.8+ 标准库（零依赖）、原生 HTML/CSS/JS 前端、gcode-diff Rust 质量引擎、可选 Electron 打包。
+</div>
+
+</div>
+</body>
+</html>
