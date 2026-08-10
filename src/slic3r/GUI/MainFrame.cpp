@@ -32,6 +32,7 @@
 #include "3DScene.hpp"
 #include "ParamsDialog.hpp"
 #include "PrintHostDialogs.hpp"
+#include "LithophaneDialog.hpp"
 #include "wxExtensions.hpp"
 #include "GUI_ObjectList.hpp"
 #include "Mouse3DController.hpp"
@@ -2554,6 +2555,21 @@ void MainFrame::init_menubar_as_editor()
         append_menu_item(import_menu, wxID_ANY, _L("Import Configs") + dots /*+ "\t" + ctrl + "I"*/, _L("Load configs"),
             [this](wxCommandEvent&) { load_config_file(); }, "menu_import", nullptr,
             [this](){return true; }, this);
+        append_menu_item(import_menu, wxID_ANY, _L("Lithophane Generator") + dots, _L("Generate a lithophane model from an image"),
+            [this](wxCommandEvent&) {
+                if (!m_plater) return;
+                // Dialog parent is mainframe (StepMeshDialog convention). Generation
+                // happens after ShowModal() returns OK (SLAImportDialog pattern),
+                // so the mesh load step is owned by this callback, not the dialog.
+                LithophaneDialog dlg(wxGetApp().mainframe);
+                if (dlg.ShowModal() == wxID_OK && dlg.has_result()) {
+                    Slic3r::TriangleMesh mesh = dlg.take_mesh();
+                    if (mesh.facets_count() > 0) {
+                        wxGetApp().obj_list()->load_mesh_object(mesh, _L("Lithophane"));
+                    }
+                }
+            }, "menu_import", nullptr,
+            [this](){return can_add_models(); }, this);
 
         append_submenu(fileMenu, import_menu, wxID_ANY, _L("Import"), "");
 

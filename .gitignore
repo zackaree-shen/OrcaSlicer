@@ -42,3 +42,9 @@ deps_src/build/
 .claude/
 .hermes/
 CLAUDE.md
+# Lithophane generated artifacts (large, regenerable)
+*.stl
+prototype/*.png
+.lark_tmp_devlog/
+__pycache__/
+*.pyc

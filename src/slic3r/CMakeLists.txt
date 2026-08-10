@@ -247,6 +247,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/IMToolbar.hpp
     GUI/InstanceCheck.cpp
     GUI/InstanceCheck.hpp
+    GUI/LithophaneDialog.cpp
+    GUI/LithophaneDialog.hpp
     GUI/Jobs/ArrangeJob.cpp
     GUI/Jobs/ArrangeJob.hpp
     GUI/Jobs/BindJob.cpp

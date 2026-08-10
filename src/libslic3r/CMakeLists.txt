@@ -272,6 +272,8 @@ set(lisbslic3r_sources
     Layer.cpp
     Layer.hpp
     LayerRegion.cpp
+    Lithophane.cpp
+    Lithophane.hpp
     libslic3r.cpp
     libslic3r.h
     Line.cpp
