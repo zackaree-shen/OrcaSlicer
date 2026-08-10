@@ -201,6 +201,12 @@ def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.
     gx_c, gy_c = thickness_grid_shape(rgb_image.shape[0], rgb_image.shape[1], params_cmy)
     gx_t, gy_t = thickness_grid_shape(rgb_image.shape[0], rgb_image.shape[1], params_top)
 
+    # Floor for height-field layers. A 0-thickness pixel in a height-field mesh
+    # makes front/back vertices coincide and produces degenerate side-wall
+    # triangles (fails validate_mesh's degenerate check). 1e-3 mm is far below
+    # any real layer height so it does not affect the print.
+    MIN_THICKNESS = 1e-3
+
     meshes = {}
 
     # White base: full slab on the coarse grid, always present.
@@ -232,9 +238,9 @@ def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.
         # Resample each color's thickness to the coarse grid and build the
         # height-field in its Z band.
         for ch in ("C", "M", "Y"):
-            t = _resample(thickness[ch], (gy_c, gx_c))
+            t = np.maximum(_resample(thickness[ch], (gy_c, gx_c)), MIN_THICKNESS)
             meshes[ch] = heightfield_to_mesh(t, params_cmy, z_offset=bases[ch])
-        tTop = _resample(dTop, (gy_t, gx_t))
+        tTop = np.maximum(_resample(dTop, (gy_t, gx_t)), MIN_THICKNESS)
         meshes["top"] = heightfield_to_mesh(tTop, params_top, z_offset=Z_TOP_BASE)
         reached = gamut["rgb8"][idx]
         return meshes, dE, gamut, reached
@@ -248,10 +254,8 @@ def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.
         t = _resample(thickness[ch], (gy_c, gx_c))
         mask = t > 0.02  # ignore sub-membrane thickness
         verts, faces = _pixel_boxes_mesh(mask, t, z_lo, z_hi, dx, dy)
-        from litho_core import heightfield_to_mesh as _h  # noqa
-        # Build a TriangleMesh-style (vertices, faces) container.
         meshes[ch] = (verts, faces)
-    tTop = _resample(dTop, (gy_t, gx_t))
+    tTop = np.maximum(_resample(dTop, (gy_t, gx_t)), MIN_THICKNESS)
     meshes["top"] = heightfield_to_mesh(tTop, params_top, z_offset=Z_TOP_BASE)
     reached = gamut["rgb8"][idx]
     return meshes, dE, gamut, reached
