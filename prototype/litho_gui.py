@@ -289,22 +289,22 @@ class LithophaneApp(tk.Tk):
         if self._last is None or self._building:
             return
         meshes, _, _, mode, order = self._last
-        outdir = filedialog.askdirectory(title="Choose output folder")
-        if not outdir:
-            return
-        names = [("W", "white"), ("C", "cyan"), ("M", "magenta"),
-                 ("Y", "yellow"), ("top", "top_white")]
-        for key, name in names:
-            verts, faces = meshes[key]
-            if len(faces) == 0:
-                self._log(f"  litho_{name}.stl : skipped (no material)")
-                continue
-            path = os.path.join(outdir, f"litho_{name}.stl")
-            export_stl(path, verts, faces, name=f"lithophane_{name}")
-            v = validate_mesh(verts, faces)
-            self._log(f"  litho_{name}.stl : {v['num_faces']:,} faces, "
-                      f"vol={v['volume']:,.0f}, watertight={v['open_edges']==0}")
-        self._log(f"Done. mode={mode.value} order={order.value}. Stack aligned on Z.")
+
+        # 3MF composite export (Snapmaker/OrcaSlicer compatible): one object,
+        # per-part filament mapping, 100% infill.
+        from litho_3mf import assemble_lithophane_parts, write_3mf
+        try:
+            parts, offsets, names, extruders = assemble_lithophane_parts(meshes)
+            outdir = filedialog.askdirectory(title="Choose output folder for the .3mf")
+            if not outdir:
+                return
+            path = os.path.join(outdir, "lithophane.3mf")
+            write_3mf(path, parts, offsets, extruders, part_names=names)
+            self._log(f"Exported composite 3MF: {path}")
+            self._log(f"  parts={names} extruders={extruders}")
+            self._log(f"  infill=100%, per-part filament mapped")
+        except Exception as e:  # noqa: BLE001
+            self._log(f"3MF export failed: {e}")
 
     # ------------------------------------------------------------- helpers
     def _show_rgb(self, label, rgb, caption):
