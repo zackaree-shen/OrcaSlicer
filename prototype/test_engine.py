@@ -223,11 +223,45 @@ def test_full_traversal():
            f"{len(faces):,} tris")
 
 
+def test_routing():
+    """LAYERED/MIXED must be rejected (it was silently rerouted to INTERLEAVED
+    before, making LAYERED and INTERLEAVED produce identical geometry)."""
+    img = make_test_img()
+    p = params()
+
+    # LAYERED + MIXED is invalid.
+    try:
+        color_lithophane_engine(img, mode=LithoMode.LAYERED, order=ColorOrder.MIXED, params=p)
+        report("Routing: LAYERED/MIXED rejected", False)
+    except ValueError:
+        report("Routing: LAYERED/MIXED rejected", True)
+
+    # LAYERED/CMY and INTERLEAVED/MIXED must produce DIFFERENT geometry.
+    m_layered = color_lithophane_engine(img, mode=LithoMode.LAYERED,
+                                        order=ColorOrder.CMY, params=p)[0]
+    m_inter = color_lithophane_engine(img, mode=LithoMode.INTERLEAVED,
+                                      order=ColorOrder.MIXED, params=p)[0]
+    diffs = []
+    for c in ("W", "C", "M", "Y", "top"):
+        n_l = len(m_layered[c][0])
+        n_i = len(m_inter[c][0])
+        diffs.append((c, n_l, n_i))
+    differ = any(a != b for _, a, b in diffs)
+    report("Routing: LAYERED/CMY geometry differs from INTERLEAVED/MIXED", differ,
+           " ".join(f"{c}:{a}vs{b}" for c, a, b in diffs))
+
+    # INTERLEAVED mode must accept MIXED order (valid).
+    m_mixed = color_lithophane_engine(img, mode=LithoMode.INTERLEAVED,
+                                     order=ColorOrder.MIXED, params=p)
+    report("Routing: INTERLEAVED/MIXED valid", len(m_mixed[0]) == 5)
+
+
 if __name__ == "__main__":
     test_layered_orders()
     test_interleaved()
     test_greyscale()
     test_full_traversal()
+    test_routing()
     print()
     print(f"{sum(RESULTS)}/{len(RESULTS)} passed")
     sys.exit(0 if all(RESULTS) else 1)

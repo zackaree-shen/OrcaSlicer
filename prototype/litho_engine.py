@@ -178,9 +178,14 @@ def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.
     if td is None:
         td = DEFAULT_TD
 
-    # MIXED order is the same as INTERLEAVED mode (Bambu 方案B).
-    if order == ColorOrder.MIXED:
-        mode = LithoMode.INTERLEAVED
+    # MIXED is a valid *order label* ONLY for INTERLEAVED mode (Bambu 方案B).
+    # LAYERED + MIXED is a user error (LAYERED has exactly 6 CMY permutations);
+    # do NOT silently reroute it to INTERLEAVED, otherwise LAYERED/MIXED and
+    # INTERLEAVED/MIXED produce identical geometry and confuse the user.
+    if order == ColorOrder.MIXED and mode != LithoMode.INTERLEAVED:
+        raise ValueError(
+            f"ColorOrder.MIXED only applies to INTERLEAVED mode, "
+            f"got mode={mode.value}. For LAYERED use one of the 6 CMY orders.")
 
     from litho_core import thickness_grid_shape
     gx, gy = thickness_grid_shape(rgb_image.shape[0], rgb_image.shape[1], params)

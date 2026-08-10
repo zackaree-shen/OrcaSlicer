@@ -57,6 +57,8 @@ class LithophaneApp(tk.Tk):
         self._after_id = None  # debounce timer
 
         self._build_ui()
+        # Sync order dropdown to the initial mode (LAYERED -> 6 CMY orders).
+        self._on_mode_change()
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self):
@@ -169,12 +171,22 @@ class LithophaneApp(tk.Tk):
         self._schedule_auto()
 
     def _on_mode_change(self, _evt=None):
-        # MIXED order only makes sense with INTERLEAVED; auto-fix order dropdown.
-        if self.mode_var.get() == LithoMode.INTERLEAVED.value and \
-           self.order_var.get() in (o.value for o in _ORDER_CMY_ORDER):
+        # The order dropdown must match the mode:
+        #   LAYERED     -> exactly the 6 CMY permutations
+        #   INTERLEAVED -> MIXED (Bambu 方案B, same-band)
+        #   GREYSCALE   -> order irrelevant (locked to CMY placeholder)
+        mode = LithoMode(self.mode_var.get())
+        if mode == LithoMode.LAYERED:
+            choices = [o.value for o in _ORDER_CMY_ORDER]
+            if self.order_var.get() not in choices:
+                self.order_var.set(ColorOrder.CMY.value)
+        elif mode == LithoMode.INTERLEAVED:
+            choices = [ColorOrder.MIXED.value]
             self.order_var.set(ColorOrder.MIXED.value)
-        if self.mode_var.get() == LithoMode.GREYSCALE.value:
+        else:  # GREYSCALE
+            choices = [ColorOrder.CMY.value]
             self.order_var.set(ColorOrder.CMY.value)
+        self.order_cb.config(values=choices)
         self._schedule_auto()
 
     def _schedule_auto(self, _evt=None):
