@@ -255,7 +255,34 @@ def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.
         mask = t > 0.02  # ignore sub-membrane thickness
         verts, faces = _pixel_boxes_mesh(mask, t, z_lo, z_hi, dx, dy)
         meshes[ch] = (verts, faces)
-    tTop = np.maximum(_resample(dTop, (gy_t, gx_t)), MIN_THICKNESS)
-    meshes["top"] = heightfield_to_mesh(tTop, params_top, z_offset=Z_TOP_BASE)
+
+    # The top relief layer's bottom must follow the actual C/M/Y fill height
+    # (z_lo + max(dC,dM,dY)) per pixel, otherwise it floats in air over pixels
+    # whose color boxes are shorter than the full band. Use a variable-bottom
+    # band mesh: bottom = fill top, top = bottom + dTop.
+    #
+    # The color boxes live on the COARSE grid; the top relief is on the FINE
+    # grid. A bilinear upsample of the coarse fill would dilute box tops at box
+    # edges and re-open small gaps, so we upsample the fill by NEAREST neighbor:
+    # every fine point takes the fill of the coarse cell it falls in, which is
+    # guaranteed >= that cell's actual box top. The band mesh bottom is then a
+    # staircase that never dips below the material below it.
+    from litho_core import heightfield_band_mesh
+    dC_c = _resample(dC, (gy_c, gx_c))
+    dM_c = _resample(dM, (gy_c, gx_c))
+    dY_c = _resample(dY, (gy_c, gx_c))
+    fill_coarse = z_lo + np.maximum.reduce([dC_c, dM_c, dY_c])   # (gy_c, gx_c)
+
+    def _nearest_upsample(a, shape):
+        gy_f, gx_f = shape
+        gy_c0, gx_c0 = a.shape
+        iy = np.clip(np.round(np.linspace(0, gy_c0 - 1, gy_f)).astype(int), 0, gy_c0 - 1)
+        ix = np.clip(np.round(np.linspace(0, gx_c0 - 1, gx_f)).astype(int), 0, gx_c0 - 1)
+        return a[np.ix_(iy, ix)]
+
+    fill_fine = _nearest_upsample(fill_coarse, (gy_t, gx_t))
+    bot = fill_fine + LAYER_GAP                       # never below the color boxes
+    topf = bot + np.maximum(_resample(dTop, (gy_t, gx_t)), MIN_THICKNESS)
+    meshes["top"] = heightfield_band_mesh(bot, topf, params_top)
     reached = gamut["rgb8"][idx]
     return meshes, dE, gamut, reached

@@ -144,6 +144,19 @@ def test_interleaved():
     report("INTERLEAVED: dE median sane", float(np.median(dE)) <= 6.0,
            f"dE_med={float(np.median(dE)):.2f}")
 
+    # 5. NO FLOATING: the top relief's bottom must sit on (or above) the
+    #    actual C/M/Y fill height at every point. Any pixel whose top layer
+    #    bottom is above the color fill + a small gap means the top floats.
+    vt = meshes["top"][0]
+    top_bot = vt[vt[:, 2] < vt[:, 2].max() - 0.01, 2]  # bottom-surface vertices
+    # The minimum top bottom must be >= z_lo + min positive box height + gap.
+    # (color boxes start at z_lo=Z_C_BASE and are >= 0.02 thick where present).
+    z_lo = Z_C_BASE
+    min_expected = z_lo + 0.02 + LAYER_GAP - 0.05  # tolerance
+    report("INTERLEAVED: top bottom follows color fill (no floating)",
+           float(top_bot.min()) >= min_expected,
+           f"top_bottom_min={float(top_bot.min()):.3f} expect>={min_expected:.3f}")
+
 
 # ---------------------------------------------------------------------------
 # GREYSCALE (M1)

@@ -122,32 +122,42 @@ def heightfield_to_mesh(heights, params, z_offset=0.0):
       faces:    (M, 3) int array of vertex indices, CCW outward.
     """
     h = np.asarray(heights, dtype=np.float64)
-    gy, gx = h.shape
+    bottom = np.full_like(h, z_offset)
+    top = h + z_offset
+    return heightfield_band_mesh(bottom, top, params)
+
+
+def heightfield_band_mesh(bottom, top, params):
+    """Build a closed solid mesh between two height-fields.
+
+    bottom, top: (gy, gx) float arrays of z height in mm (bottom <= top).
+    The solid is closed by the top surface (z = top), the bottom surface
+    (z = bottom) and four side walls along the grid boundary. All faces CCW
+    outward so signed volume is positive. This generalizes heightfield_to_mesh
+    (constant bottom) to a variable bottom — used e.g. for a top relief layer
+    whose underside follows the actual C/M/Y fill height underneath, so the
+    layer never floats in air.
+
+    Returns (vertices, faces).
+    """
+    bottom = np.asarray(bottom, dtype=np.float64)
+    top = np.asarray(top, dtype=np.float64)
+    gy, gx = top.shape
+    assert bottom.shape == (gy, gx), "bottom and top must have same shape"
 
     dx = params.width_mm / float(gx - 1)
     dy = params.height_mm / float(gy - 1)
 
-    # Vertex grids.
     xs = np.arange(gx, dtype=np.float64) * dx
     ys = np.arange(gy, dtype=np.float64) * dy
     X, Y = np.meshgrid(xs, ys)          # (gy, gx)
 
-    # Front vertices (row-major, iy*gx+ix), z = z_offset + thickness.
-    front = np.stack([X, Y, h + z_offset], axis=-1).reshape(-1, 3)
-    # Back vertices, z = z_offset.
-    back = np.stack([X, Y, np.full_like(h, z_offset)], axis=-1).reshape(-1, 3)
+    # Top surface vertices (row-major, iy*gx+ix), z = top.
+    front = np.stack([X, Y, top], axis=-1).reshape(-1, 3)
+    # Bottom surface vertices, z = bottom.
+    back = np.stack([X, Y, bottom], axis=-1).reshape(-1, 3)
     vertices = np.vstack([front, back])  # (2*gx*gy, 3)
 
-    def vf(iy, ix):
-        return iy * gx + ix
-    def vb(iy, ix):
-        return gy * gx + iy * gx + ix
-
-    faces = []
-
-    # ---- Vectorized quad generation (winding identical to the original
-    # explicit-loop implementation, which was validated watertight + CCW).
-    # Each quad (a,b,c,d) CCW from outside produces triangles (a,b,c),(a,c,d).
     def _quads(a, b, c, d):
         t1 = np.stack([a, b, c], axis=-1)
         t2 = np.stack([a, c, d], axis=-1)
@@ -155,31 +165,28 @@ def heightfield_to_mesh(heights, params, z_offset=0.0):
 
     iy = np.arange(gy - 1)[:, None]
     ix = np.arange(gx - 1)[None, :]
-    # vf(y,x) = y*gx + x ; vb(y,x) = back_base + y*gx + x
-    a = iy * gx + ix                       # vf(y,   x  )
-    b = a + 1                              # vf(y,   x+1)
-    c = a + gx + 1                         # vf(y+1, x+1)
-    d = a + gx                             # vf(y+1, x  )
+    a = iy * gx + ix
+    b = a + 1
+    c = a + gx + 1
+    d = a + gx
     back_base = gy * gx
     ba, bb, bc, bd = a + back_base, b + back_base, c + back_base, d + back_base
 
     parts = []
-    # Front surface, normal +Z.
+    # Top surface, normal +Z.
     parts.append(_quads(a, b, c, d))
-    # Back surface, normal -Z (reverse winding: (a,d,c),(a,c,b)).
+    # Bottom surface, normal -Z (reverse winding).
     parts.append(_quads(ba, bd, bc, bb))
-    # Bottom edge iy=0, outward -Y: front(0,x), back(0,x), back(0,x+1), front(0,x+1)
+    # Side walls: same boundary strips as the constant-bottom case; the vertex
+    # indices are identical, only the bottom vertices' z varies with `bottom`.
     xe = np.arange(gx - 1)
-    parts.append(_quads(xe, back_base + xe, back_base + xe + 1, xe + 1))
-    # Top edge iy=gy-1, outward +Y.
+    parts.append(_quads(xe, back_base + xe, back_base + xe + 1, xe + 1))  # y=0, -Y
     atop = (gy - 1) * gx + xe
-    parts.append(_quads(atop, atop + 1, back_base + atop + 1, back_base + atop))
-    # Left edge ix=0, outward -X: front(y,0), front(y+1,0), back(y+1,0), back(y,0)
+    parts.append(_quads(atop, atop + 1, back_base + atop + 1, back_base + atop))  # y=gy-1, +Y
     ye = np.arange(gy - 1) * gx
-    parts.append(_quads(ye, ye + gx, back_base + ye + gx, back_base + ye))
-    # Right edge ix=gx-1, outward +X.
+    parts.append(_quads(ye, ye + gx, back_base + ye + gx, back_base + ye))  # x=0, -X
     aright = ye + (gx - 1)
-    parts.append(_quads(aright, back_base + aright, back_base + aright + gx, aright + gx))
+    parts.append(_quads(aright, back_base + aright, back_base + aright + gx, aright + gx))  # x=gx-1, +X
 
     faces = np.concatenate(parts, axis=0).astype(np.int64)
     return vertices, faces
