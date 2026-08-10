@@ -208,17 +208,23 @@ def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.
     meshes["W"] = heightfield_to_mesh(tW, params_cmy, z_offset=0.0)
 
     if mode == LithoMode.GREYSCALE:
-        # Single grey relief (M1): brightness -> top thickness only.
-        grey = np.asarray(rgb_image.convert("L") if hasattr(rgb_image, "convert") else
-                          (0.299 * rgb_image[..., 0] + 0.587 * rgb_image[..., 1] +
-                           0.114 * rgb_image[..., 2]))
-        tTop = _resample(dTop, (gy_t, gx_t))
-        meshes["top"] = heightfield_to_mesh(tTop, params_top, z_offset=0.0)
+        # Single grey relief (M1): brightness -> thickness, using the real
+        # greyscale pipeline (litho_core.thickness_map), NOT the color solver's
+        # dTop. dark pixel -> thick (less backlight), white -> thin.
+        from litho_core import thickness_map
+        grey = (0.299 * rgb_image[..., 0] + 0.587 * rgb_image[..., 1] +
+                0.114 * rgb_image[..., 2]).astype(np.uint8)
+        g = _resample(grey.astype(np.float64), (gy_t, gx_t))
+        g = np.clip(g, 0, 255).astype(np.uint8)
+        h = thickness_map(g, params_top)   # (gy_t, gx_t) thickness in mm
+        meshes["top"] = heightfield_to_mesh(h, params_top, z_offset=0.0)
         # C/M/Y are unused in greyscale mode: attach empty meshes so callers
         # can iterate all five keys uniformly.
         empty = (np.zeros((0, 3)), np.zeros((0, 3), dtype=np.int64))
         for ch in ("C", "M", "Y"):
             meshes[ch] = empty
+        # dE is not meaningful for pure greyscale (no color matching).
+        dE = np.zeros((gy_t, gx_t))
         return meshes, dE, gamut, None
 
     if mode == LithoMode.LAYERED:
