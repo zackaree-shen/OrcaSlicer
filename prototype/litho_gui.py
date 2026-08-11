@@ -78,9 +78,23 @@ class LithophaneApp(tk.Tk):
         self.preview_orig = tk.Label(left, text="Original\n(no image)", bg="#222", fg="#aaa",
                                      width=48, height=12, anchor="center")
         self.preview_orig.grid(row=0, column=0, sticky="nsew", pady=(0, 6))
-        self.preview_reach = tk.Label(left, text="Printed\n(backlit result)", bg="#222", fg="#aaa",
-                                      width=48, height=12, anchor="center")
-        self.preview_reach.grid(row=1, column=0, sticky="nsew")
+
+        # Bottom preview: tabs for 2D backlit result and interactive 3D view.
+        self.preview_tabs = ttk.Notebook(left)
+        self.preview_tabs.grid(row=1, column=0, sticky="nsew")
+
+        self._tab_2d = ttk.Frame(self.preview_tabs)
+        self._tab_3d = ttk.Frame(self.preview_tabs)
+        self.preview_tabs.add(self._tab_2d, text="Backlit (2D)")
+        self.preview_tabs.add(self._tab_3d, text="3D view")
+
+        self.preview_reach = tk.Label(self._tab_2d, text="Printed\n(backlit result)",
+                                      bg="#222", fg="#aaa", width=48, height=12, anchor="center")
+        self.preview_reach.pack(fill=tk.BOTH, expand=True)
+
+        from litho_view3d import LithoView3D
+        self.view3d = LithoView3D(self._tab_3d)
+        self.view3d.pack(fill=tk.BOTH, expand=True)
 
         # --- Right: parameters ---
         right = ttk.LabelFrame(root, text="Parameters", padding=8)
@@ -356,6 +370,8 @@ class LithophaneApp(tk.Tk):
             self.btn_export.config(state="normal")
             if reached is not None:
                 self._show_rgb(self.preview_reach, reached, f"Printed ({mode.value}/{order.value})")
+            # Feed meshes to the interactive 3D view.
+            self.view3d.set_meshes(meshes)
 
             dE_flat = dE.ravel() if reached is not None else np.array([0])
             total_vol = sum(_mesh_volume(v, f) for v, f in meshes.values())
