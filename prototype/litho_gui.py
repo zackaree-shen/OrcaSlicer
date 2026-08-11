@@ -176,6 +176,9 @@ class LithophaneApp(tk.Tk):
         self.btn_export = ttk.Button(right, text="3. Export...", command=self.export_stls,
                                      state="disabled")
         self.btn_export.grid(row=row, column=0, columnspan=2, sticky="we", pady=2); row += 1
+        self.btn_reverse = ttk.Button(right, text="4. Reverse-import (STL/3MF -> preview)",
+                                      command=self.reverse_import)
+        self.btn_reverse.grid(row=row, column=0, columnspan=2, sticky="we", pady=2); row += 1
 
         self.status = tk.Text(right, height=16, width=40, state="disabled",
                               font=("Consolas", 9), background="#111", foreground="#9f9")
@@ -384,6 +387,47 @@ class LithophaneApp(tk.Tk):
             self.vendor_cb.grid()
             self.printer_lbl.grid()
             self.printer_cb.grid()
+
+    def reverse_import(self):
+        """Reverse-import: pick a 3MF (or separate STLs), reconstruct the
+        preview, and show it vs the original image."""
+        from litho_reverse import load_3mf_colors, reconstruct_from_meshes
+        path = filedialog.askopenfilename(
+            title="Choose a 3MF (or STL) to reverse-import",
+            filetypes=[("3MF / STL", "*.3mf *.stl"), ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            if path.lower().endswith(".3mf"):
+                cmeshes = load_3mf_colors(path)
+            else:
+                # Single STL: not enough color info for STACKED; error clearly.
+                messagebox.showerror("Single STL",
+                                     "A single merged STL has no color identity "
+                                     "(C/M/Y overlap per-pixel in stacked mode). "
+                                     "Please import the 3MF instead.")
+                return
+            # Output size: from the W mesh XY span (fallback to 100x100).
+            if "W" in cmeshes and len(cmeshes["W"]):
+                v = cmeshes["W"].reshape(-1, 3)
+                w = float(v[:, 0].max() - v[:, 0].min())
+                h = float(v[:, 1].max() - v[:, 1].min())
+            else:
+                w = h = 100.0
+            recon = reconstruct_from_meshes(cmeshes, w, h, pixel_pitch=max(w / 200, 0.5))
+            self._log(f"Reverse-imported {os.path.basename(path)}: colors="
+                      f"{sorted(cmeshes.keys())}, size={w:.0f}x{h:.0f}mm")
+            if self.rgb is not None:
+                # Show original (resized) on top, reconstruction below.
+                from litho_color import _resample_rgb
+                orig_r = _resample_rgb(self.rgb, recon.shape[:2])
+                self._show_rgb(self.preview_orig, orig_r, "Original")
+            self._show_rgb(self.preview_reach, recon,
+                           f"Reconstructed ({os.path.basename(path)})")
+        except Exception as e:  # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+            self._log(f"Reverse-import failed: {e}")
 
     def export_stls(self):
         if self._last is None or self._building:

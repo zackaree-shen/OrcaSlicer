@@ -173,8 +173,12 @@ def _pixel_boxes_mesh(mask, thickness, z_lo, z_hi, dx, dy):
         for a, b, c in tris:
             faces.append((vbase + a, vbase + b, vbase + c))
 
-    for iy in range(gy):
-        for ix in range(gx):
+    # Build (gx-1)*(gy-1) boxes, one per CELL, so the union covers exactly
+    # [0, (gx-1)*dx] x [0, (gy-1)*dy] — matching the W base and top relief
+    # extents. Building gx*gy boxes would extend half a cell beyond the model
+    # and offset the color layers 0.5 mm in +x/+y (adversarial finding #7).
+    for iy in range(gy - 1):
+        for ix in range(gx - 1):
             if not mask[iy, ix]:
                 continue
             lo = z_lo_arr[iy, ix]
