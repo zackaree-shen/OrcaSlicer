@@ -274,25 +274,27 @@ def assemble_lithophane_parts(meshes, order=None, filament_map=None):
         filament_map = {"W": 4, "C": 1, "M": 2, "Y": 3, "top": 4}
 
     parts, offsets, names, extruders = [], [], [], []
-    z_cursor = 0.0
     for color in order:
         verts, faces = meshes[color]
         if len(verts) == 0 or len(faces) == 0:
             continue
-        # Normalize per part: shift XY to center on origin, and Z to start at 0.
-        # (The engine emits absolute Z; we strip the Z offset and let the
-        # composite transform stack the parts.)
+        # Center XY on the origin. For Z: keep each part's ORIGINAL base height
+        # as the composite offset and normalize the local Z to start at 0. This
+        # preserves per-part absolute Z placement: LAYERED bands stay disjoint
+        # (offsets 0.85/1.54/...), while INTERLEAVED/OVERLAP C/M/Y all share the
+        # same base offset so their boxes genuinely overlap in Z — which the
+        # slicer's clip_multipart_objects resolves by part order. (Adversarial
+        # finding: stripping Z entirely collapsed the overlap.)
         verts = np.asarray(verts, dtype=np.float64)
         local = np.array(verts, copy=True)
         cx = 0.5 * (local[:, 0].min() + local[:, 0].max())
         cy = 0.5 * (local[:, 1].min() + local[:, 1].max())
-        zmin = float(local[:, 2].min())
+        zbase = float(local[:, 2].min())
         local[:, 0] -= cx
         local[:, 1] -= cy
-        local[:, 2] -= zmin
+        local[:, 2] -= zbase
         parts.append((local, faces))
-        offsets.append((0.0, 0.0, z_cursor))
+        offsets.append((0.0, 0.0, zbase))
         names.append(color)
         extruders.append(filament_map[color])
-        z_cursor += float(local[:, 2].max())
     return parts, offsets, names, extruders
