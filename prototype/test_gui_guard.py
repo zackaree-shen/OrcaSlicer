@@ -67,21 +67,23 @@ def test_grid_guard():
 
 
 def test_image_size_clamp():
-    """Any image (even 12000x8000 phone photos) must yield a valid output size
-    that passes the _read_ui validation, preserving aspect ratio.
+    """Any image must yield a printable default size (long side 144 mm,
+    aspect-preserving) that passes _read_ui — a 1px=1mm default made phone
+    photos multi-metre objects and OrcaSlicer warned 'too large'.
 
-    Regression for: 'width must be in [10,5000]' on image pick.
+    Regression for: 'width must be in [10,5000]' and 'object too large'.
     """
-    # Mirrors LithophaneApp.pick_image clamp logic.
-    MAX_MM = 3000.0
-    for w_px, h_px in [(640, 480), (1920, 1080), (4000, 3000), (12000, 8000)]:
-        scale = min(1.0, MAX_MM / max(w_px, h_px))
+    TARGET_LONG_MM = 144.0
+    for w_px, h_px in [(640, 480), (1920, 1080), (4000, 3000), (12000, 8000),
+                       (4000, 6000), (1000, 1000)]:
+        scale = TARGET_LONG_MM / max(w_px, h_px)
         w_use = round(w_px * scale)
         h_use = round(h_px * scale)
-        ok_range = 10 <= w_use <= 10000 and 10 <= h_use <= 10000
-        ok_ratio = abs((w_use / h_use) - (w_px / h_px)) < 0.02
-        report(f"image {w_px}x{h_px}: size valid + aspect preserved",
-               ok_range and ok_ratio, f"-> {w_use}x{h_use}")
+        ok_size = 10 <= w_use <= 10000 and 10 <= h_use <= 10000
+        ok_print = max(w_use, h_use) <= TARGET_LONG_MM
+        ok_ratio = abs((w_use / h_use) - (w_px / h_px)) / (w_px / h_px) < 0.01
+        report(f"image {w_px}x{h_px}: printable + aspect preserved",
+               ok_size and ok_print and ok_ratio, f"-> {w_use}x{h_use}mm")
 
 
 if __name__ == "__main__":

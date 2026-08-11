@@ -201,22 +201,23 @@ class LithophaneApp(tk.Tk):
             return
         self._show_rgb(self.preview_orig, self.rgb, "Original")
         self.btn_build.config(state="normal")
-        # Default output size = original image dimensions (1 px = 1 mm),
-        # scaled down (preserving aspect ratio) if it exceeds a sane printable
-        # cap, so any image loads without error (a 12000x8000 phone photo
-        # would otherwise exceed the 5000mm cap). User can edit afterwards.
-        MAX_MM = 3000.0
+        # Default output size: fit the image into a printable size, preserving
+        # aspect ratio, with the LONGER side at 144 mm (Bambu standard frame
+        # size; matches the 144x108 default params and keeps the top-relief
+        # grid under MAX_POINTS so the pitch guard does not kick in).
+        # User can still edit afterwards. (A 1px=1mm default made every phone
+        # photo a multi-metre object — OrcaSlicer correctly warned "too large".)
+        TARGET_LONG_MM = 144.0
         w_px = float(self.rgb.shape[1])
         h_px = float(self.rgb.shape[0])
-        scale = min(1.0, MAX_MM / max(w_px, h_px))
+        scale = TARGET_LONG_MM / max(w_px, h_px)
         w_use = w_px * scale
         h_use = h_px * scale
         self.w_var.set(round(w_use))
         self.h_var.set(round(h_use))
-        clamped = scale < 1.0
         self._log(f"Loaded {os.path.basename(path)}: {self.rgb.shape[1]}x{self.rgb.shape[0]} px\n"
                   f"Default output size = {w_use:.0f}x{h_use:.0f} mm "
-                  f"(1px=1mm{' - scaled from ' + str(int(w_px)) + 'x' + str(int(h_px)) + 'px' if clamped else ''}, editable)\n"
+                  f"(long side 144mm, aspect-preserving, editable)\n"
                   f"Mode={self.mode_var.get()} Order={self.order_var.get()}\n"
                   f"Auto-rebuild on parameter change is ON")
         self._schedule_auto()
