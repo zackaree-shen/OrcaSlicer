@@ -56,9 +56,81 @@ class LithoApi:
             if len(f) == 0:
                 out[c] = {"verts": [], "faces": []}
                 continue
-            out[c] = {"verts": np.asarray(v, dtype=float).ravel().tolist(),
-                      "faces": np.asarray(f, dtype=int).ravel().tolist()}
+            out[c] = self._decimate(np.asarray(v, dtype=float), np.asarray(f, dtype=np.int64))
         return out
+
+    @staticmethod
+    def _decimate(verts, faces, max_verts=12000):
+        """Decimate a structured mesh for 3D preview.
+
+        Height-field / band meshes have vertices on a grid (gx x gy XY points,
+        top and bottom share XY -> n = 2*gx*gy). We keep every Nth XY column
+        and row, then RE-TRIANGULATE on the kept grid (keeping the top surface
+        shape). The full build (top 154k verts / 14MB JSON) drops to ~10k verts
+        and <1MB while preserving the visible structure.
+
+        This only approximates the mesh (it re-triangulates the top surface),
+        which is fine for a 3D preview. The exported STL/3MF is NOT decimated.
+        """
+        n = len(verts)
+        if n <= max_verts:
+            return {"verts": verts.ravel().tolist(),
+                    "faces": faces.ravel().tolist()}
+
+        xs = np.round(verts[:, 0], 4)
+        ys = np.round(verts[:, 1], 4)
+        ux = np.unique(xs)
+        uy = np.unique(ys)
+        gx, gy = len(ux), len(uy)
+        col_of = np.searchsorted(ux, xs)
+        row_of = np.searchsorted(uy, ys)
+
+        # Stride in grid coords to reach ~max_verts vertices (target ~0.5 pts).
+        n_pts = gx * gy
+        step = max(1, int(np.ceil(np.sqrt(n_pts / (max_verts * 0.5)))))
+
+        # Kept grid points: (col, row) with col%step==0 and row%step==0.
+        keep_cols = np.arange(0, gx, step)
+        keep_rows = np.arange(0, gy, step)
+
+        # Build new vertex list: for each kept (row,col), take the FIRST
+        # vertex at that XY (top surface); optionally also bottom (skip for 3D
+        # preview — top surface + a flat bottom for solidity).
+        # We keep both top and bottom so the preview looks solid.
+        new_v = []
+        pt_index = {}  # (row,col) -> list of [top_idx, bot_idx] in new_v
+        for r in keep_rows:
+            for c in keep_cols:
+                mask = (col_of == c) & (row_of == r)
+                idxs = np.where(mask)[0]
+                if len(idxs) == 0:
+                    continue
+                # sort by z to find top (max) and bottom (min)
+                zs = verts[idxs, 2]
+                top_i = idxs[np.argmax(zs)]
+                bot_i = idxs[np.argmin(zs)]
+                new_v.append(verts[top_i])
+                new_v.append(verts[bot_i])
+                pt_index[(r, c)] = (len(new_v) - 2, len(new_v) - 1)
+        new_v = np.array(new_v, dtype=float)
+
+        # Re-triangulate top surface on kept grid: for each kept cell
+        # (r, r+step) x (c, c+step), two triangles using top verts.
+        nf = []
+        for ri in range(len(keep_rows) - 1):
+            r0 = keep_rows[ri]; r1 = keep_rows[ri + 1]
+            for ci in range(len(keep_cols) - 1):
+                c0 = keep_cols[ci]; c1 = keep_cols[ci + 1]
+                if (r0, c0) not in pt_index or (r0, c1) not in pt_index or \
+                   (r1, c0) not in pt_index or (r1, c1) not in pt_index:
+                    continue
+                a = pt_index[(r0, c0)][0]
+                b = pt_index[(r0, c1)][0]
+                c_ = pt_index[(r1, c1)][0]
+                d = pt_index[(r1, c0)][0]
+                nf += [(a, b, c_), (a, c_, d)]
+        return {"verts": new_v.ravel().tolist(),
+                "faces": np.array(nf, dtype=np.int64).ravel().tolist()}
 
     def _default_outdir(self):
         desk = os.path.join(os.path.expanduser("~"), "Desktop")

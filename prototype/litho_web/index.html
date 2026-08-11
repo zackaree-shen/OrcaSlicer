@@ -136,6 +136,13 @@
           3D 视图
           <span class="hint">左键旋转 · 滚轮缩放 · 右键平移</span>
         </div>
+        <div class="layer-legend">
+          <label class="lg lg-w"><input type="checkbox" checked onchange="toggleLayer('W', this.checked)"> W 底</label>
+          <label class="lg lg-c"><input type="checkbox" checked onchange="toggleLayer('C', this.checked)"> C 青</label>
+          <label class="lg lg-m"><input type="checkbox" checked onchange="toggleLayer('M', this.checked)"> M 品</label>
+          <label class="lg lg-y"><input type="checkbox" checked onchange="toggleLayer('Y', this.checked)"> Y 黄</label>
+          <label class="lg lg-t"><input type="checkbox" checked onchange="toggleLayer('top', this.checked)"> top 白</label>
+        </div>
         <div class="card-body card-3d-body">
           <div id="three-container"></div>
         </div>

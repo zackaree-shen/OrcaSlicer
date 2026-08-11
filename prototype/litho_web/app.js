@@ -130,6 +130,8 @@ window.reverseImport = async () => {
 /* ===================== Three.js 3D view ===================== */
 let renderer, scene, camera, controls = { rx: -0.5, ry: 0.6, zoom: 1, px: 0, py: 0 };
 let meshGroup = null;
+let layerMeshes = {};   // color -> THREE.Mesh
+let layerVisible = { W: true, C: true, M: true, Y: true, top: true };
 let isDragging = false, dragBtn = 0, lastX = 0, lastY = 0;
 
 const LAYER_COLORS = { W: 0xe2e8f0, C: 0x38bdf8, M: 0xf472b6, Y: 0xfde047, top: 0xffffff };
@@ -186,8 +188,14 @@ function onResize3D() {
 
 function render3D(meshes) {
   if (!renderer) init3D();
-  // Remove old meshes.
-  if (meshGroup) { scene.remove(meshGroup); meshGroup.geometry?.dispose?.(); }
+  // Dispose old layers' geometries.
+  for (const key of Object.keys(layerMeshes)) {
+    const m = layerMeshes[key];
+    if (m) { m.geometry.dispose(); m.material.dispose(); }
+  }
+  layerMeshes = {};
+
+  if (meshGroup) { scene.remove(meshGroup); }
   meshGroup = new THREE.Group();
   scene.add(meshGroup);
 
@@ -208,7 +216,9 @@ function render3D(meshes) {
       const bb = new THREE.Box3().setFromObject(mesh);
       const center = bb.getCenter(new THREE.Vector3());
       mesh.position.sub(center);
+      mesh.visible = layerVisible[color] !== false;
       meshGroup.add(mesh);
+      layerMeshes[color] = mesh;
     }
   }
 
@@ -219,6 +229,13 @@ function render3D(meshes) {
   meshGroup.position.x = controls.px;
   meshGroup.position.y = controls.py;
 
+  renderer.render(scene, camera);
+}
+
+/* Layer visibility toggles (from the sidebar legend) */
+function toggleLayer(color, visible) {
+  layerVisible[color] = visible;
+  if (layerMeshes[color]) layerMeshes[color].visible = visible;
   renderer.render(scene, camera);
 }
 

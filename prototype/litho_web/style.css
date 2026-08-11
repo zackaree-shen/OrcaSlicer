@@ -209,3 +209,26 @@ body {
 .card-3d-body { padding: 0; }
 #three-container { width: 100%; height: 100%; }
 #three-container canvas { display: block; }
+
+.layer-legend {
+  display: flex; align-items: center; gap: 14px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.layer-legend .lg {
+  display: flex; align-items: center; gap: 5px;
+  font-size: 12px; cursor: pointer;
+  user-select: none;
+}
+.layer-legend .lg input { accent-color: var(--accent); }
+.layer-legend .lg-w::before, .layer-legend .lg-c::before,
+.layer-legend .lg-m::before, .layer-legend .lg-y::before,
+.layer-legend .lg-t::before {
+  content: ''; width: 10px; height: 10px; border-radius: 3px; display: inline-block;
+}
+.lg-w::before { background: var(--w); }
+.lg-c::before { background: var(--c); }
+.lg-m::before { background: var(--m); }
+.lg-y::before { background: var(--y); }
+.lg-t::before { background: #fff; }
