@@ -510,6 +510,74 @@ def forward_stacked(dTop, dC, dM, dY, td=None, dW=WHITE_THICKNESS, backlight=(1.
     return np.asarray(backlight) * tau
 
 
+def forward_segstack(dTop, dC, dM, dY, td=None, dW=WHITE_THICKNESS, backlight=(1.0, 1.0, 1.0)):
+    """OVERLAP forward model — segment-stack (segstack), order-dependent.
+
+    The slicer resolves same-base overlapping C/M/Y parts by PART ORDER
+    (clip_multipart_objects, PrintObjectSlice.cpp): with export order
+    W,C,M,Y,top, the LAST part (Y) wins the overlap. The printed column per
+    pixel is therefore a *segment stack* in part order:
+        Y occupies [0, dY)
+        M occupies [dY, max(dY, dM))   (only the part above Y)
+        C occupies [max(dY,dM), max(dY,dM,dC))
+    and the transmitted color is the product of Beer-Lambert transmissions of
+    each segment. This is what a same-base overlapping geometry ACTUALLY
+    prints (verified by reading the slicer source; the naive 'max column wins'
+    model is wrong — the winner is the last part, not the tallest).
+
+    Part order is fixed to W,C,M,Y,top (our export order). To compare
+    algorithms under different orders, permute dC/dM/dY before calling.
+    """
+    if td is None:
+        td = DEFAULT_TD
+    dC = np.asarray(dC, dtype=np.float64)[..., None]
+    dM = np.asarray(dM, dtype=np.float64)[..., None]
+    dY = np.asarray(dY, dtype=np.float64)[..., None]
+    dTop = np.asarray(dTop, dtype=np.float64)[..., None]
+    tdc = np.asarray(td["C"], dtype=np.float64)
+    tdm = np.asarray(td["M"], dtype=np.float64)
+    tdy = np.asarray(td["Y"], dtype=np.float64)
+    tdw = np.asarray(td["W"], dtype=np.float64)
+
+    # Segment thicknesses in part order Y, M, C (bottom-up).
+    dY_seg = dY
+    dM_seg = np.maximum(dM - dY, 0.0)
+    dC_seg = np.maximum(dC - np.maximum(dY, dM), 0.0)
+    exponent = (dW / tdw + dTop / tdw
+                + dY_seg / tdy + dM_seg / tdm + dC_seg / tdc)
+    tau = 10.0 ** (-exponent)
+    return np.asarray(backlight) * tau
+
+
+def build_gamut_overlap(layers_max=8, layer_h=0.08, top_max=TOP_BAND_MAX, top_step=0.08,
+                        dW=WHITE_THICKNESS, td=None):
+    """OVERLAP color card (segstack model, order-dependent W,C,M,Y,top).
+
+    Same enumeration as stacked but the forward model uses forward_segstack
+    (part-order segment stack, matching what overlapping geometry actually
+    prints). Returns the same dict shape as build_gamut_stacked so
+    solve_stacked is reusable. Card is less degenerate than max but still
+    order-fixed.
+    """
+    if td is None:
+        td = DEFAULT_TD
+    n_top = int(round(top_max / top_step))
+    combos = list(itertools.product(range(n_top + 1), range(layers_max + 1),
+                                    range(layers_max + 1), range(layers_max + 1)))
+    dTop = np.array([c[0] for c in combos], dtype=np.float64) * top_step
+    dC = np.array([c[1] for c in combos], dtype=np.float64) * layer_h
+    dM = np.array([c[2] for c in combos], dtype=np.float64) * layer_h
+    dY = np.array([c[3] for c in combos], dtype=np.float64) * layer_h
+    rgb_lin = forward_segstack(dTop, dC, dM, dY, td=td, dW=dW)
+    lab = xyz_to_lab(linear_to_xyz(rgb_lin))
+    return {
+        "lab": lab,
+        "rgb_linear": rgb_lin,
+        "rgb8": linear_to_srgb8(rgb_lin),
+        "thickness": np.stack([dTop, dC, dM, dY], axis=-1),
+    }
+
+
 def build_gamut_stacked(layers_max=8, layer_h=0.08, top_max=TOP_BAND_MAX, top_step=0.08,
                         dW=WHITE_THICKNESS, td=None):
     """Precompute the reachable 5-layer color card.

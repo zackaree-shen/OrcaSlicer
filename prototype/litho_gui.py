@@ -246,7 +246,7 @@ class LithophaneApp(tk.Tk):
             choices = [o.value for o in _ORDER_CMY_ORDER]
             if self.order_var.get() not in choices:
                 self.order_var.set(ColorOrder.CMY.value)
-        elif mode == LithoMode.INTERLEAVED:
+        elif mode in (LithoMode.INTERLEAVED, LithoMode.OVERLAP):
             choices = [ColorOrder.MIXED.value]
             self.order_var.set(ColorOrder.MIXED.value)
         else:  # GREYSCALE / STACKED: fixed CMY order

@@ -55,6 +55,9 @@ class LithoMode(enum.Enum):
     INTERLEAVED = "interleaved"  # C/M/Y share one Z band (mixed / Bambu B)
     STACKED = "stacked"        # Bambu-style: per-pixel C->M->Y continuous
                                # stacked column, zero gap, never floats
+    OVERLAP = "overlap"        # C/M/Y same-base overlapping boxes + MAX color
+                               # model (what overlapping geometry actually
+                               # prints) — gamut-collapsed comparison mode
 
 
 class ColorOrder(enum.Enum):
@@ -231,22 +234,28 @@ def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.
     if td is None:
         td = DEFAULT_TD
 
-    # MIXED is a valid *order label* ONLY for INTERLEAVED mode (Bambu 方案B).
-    # LAYERED + MIXED is a user error (LAYERED has exactly 6 CMY permutations);
-    # do NOT silently reroute it to INTERLEAVED, otherwise LAYERED/MIXED and
-    # INTERLEAVED/MIXED produce identical geometry and confuse the user.
-    if order == ColorOrder.MIXED and mode != LithoMode.INTERLEAVED:
+    # MIXED is a valid *order label* ONLY for the same-base modes
+    # (INTERLEAVED / OVERLAP, Bambu 方案B). LAYERED + MIXED is a user error
+    # (LAYERED has exactly 6 CMY permutations); do NOT silently reroute it.
+    if order == ColorOrder.MIXED and mode not in (LithoMode.INTERLEAVED, LithoMode.OVERLAP):
         raise ValueError(
-            f"ColorOrder.MIXED only applies to INTERLEAVED mode, "
+            f"ColorOrder.MIXED only applies to INTERLEAVED/OVERLAP modes, "
             f"got mode={mode.value}. For LAYERED use one of the 6 CMY orders.")
 
     from litho_core import thickness_grid_shape
     gx, gy = thickness_grid_shape(rgb_image.shape[0], rgb_image.shape[1], params)
     small = _resample_rgb(rgb_image, (gy, gx))
 
-    # Shared gamut + inverse solver (order-independent by Beer-Lambert).
-    gamut = build_gamut_stacked(layers_max=layers_max, layer_h=layer_h,
-                                top_max=top_max, dW=dW, td=td)
+    # Gamut + inverse solver. INTERLEAVED/STACKED/LAYERED use the stacked
+    # (sum, Beer-Lambert product) model; OVERLAP uses the max model matching
+    # the same-base overlapping geometry it actually prints.
+    if mode == LithoMode.OVERLAP:
+        from litho_color import build_gamut_overlap
+        gamut = build_gamut_overlap(layers_max=layers_max, layer_h=layer_h,
+                                    top_max=top_max, dW=dW, td=td)
+    else:
+        gamut = build_gamut_stacked(layers_max=layers_max, layer_h=layer_h,
+                                    top_max=top_max, dW=dW, td=td)
     dTop, dC, dM, dY, dE, idx = solve_stacked(small, gamut, exact=exact)
 
     thickness = {"C": dC, "M": dM, "Y": dY, "top": dTop, "W": np.full_like(dTop, dW)}
@@ -357,7 +366,12 @@ def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.
         reached = gamut["rgb8"][idx]
         return meshes, dE, gamut, reached
 
-    # INTERLEAVED: C/M/Y share one Z band, pixel boxes only where thickness > 0.
+    # INTERLEAVED and OVERLAP share the same same-base overlapping geometry:
+    # C/M/Y boxes all start at z_lo and have different heights, so they
+    # overlap in Z. INTERLEAVED matches it with the sum color card (preview
+    # only — printing collapses to max); OVERLAP matches it with the max color
+    # card (what the overlapping geometry actually prints). Fall-through from
+    # both modes reaches this block.
     dx = params_cmy.width_mm / float(gx_c - 1)
     dy = params_cmy.height_mm / float(gy_c - 1)
     z_lo, z_hi = _color_band_bounds(dW, layer_h, layers_max)  # shared C/M/Y band

@@ -231,7 +231,7 @@ def test_full_traversal():
     for mode in LithoMode:
         if mode == LithoMode.LAYERED:
             orders = [ColorOrder.CMY, ColorOrder.YMC]
-        elif mode == LithoMode.INTERLEAVED:
+        elif mode in (LithoMode.INTERLEAVED, LithoMode.OVERLAP):
             orders = [ColorOrder.MIXED]
         elif mode == LithoMode.STACKED:
             orders = [ColorOrder.CMY]
@@ -297,6 +297,46 @@ def test_stacked_no_floating():
            f"{len(faces):,} tris")
 
 
+def test_overlap():
+    """OVERLAP mode shares the same-base overlapping geometry with INTERLEAVED
+    but uses the SEGSTACK color card (part-order segment stack, matching what
+    the overlapping geometry actually prints). Its dE vs the sum model differs
+    because segstack is order-fixed; geometry must be watertight, C/M/Y same
+    base Z."""
+    img = make_test_img()
+    p = params()
+    m_o, dE_o, gamut_o, _ = color_lithophane_engine(img, mode=LithoMode.OVERLAP,
+                                                    order=ColorOrder.MIXED, params=p,
+                                                    pitch_cmy=1.0, pitch_top=1.0)
+    m_i, dE_i, gamut_i, _ = color_lithophane_engine(img, mode=LithoMode.INTERLEAVED,
+                                                    order=ColorOrder.MIXED, params=p,
+                                                    pitch_cmy=1.0, pitch_top=1.0)
+
+    # Watertight.
+    ok_w = all(_check_mesh(c, v, f) for c, (v, f) in m_o.items())
+    report("OVERLAP: all meshes watertight", ok_w)
+
+    # Same same-base overlapping structure: C/M/Y all start at the same z_lo
+    # (geometry pattern identical to INTERLEAVED, though thickness differs).
+    z_lo_o = [float(m_o[c][0][:, 2].min()) for c in ("C", "M", "Y") if len(m_o[c][0])]
+    same_base = len(set(round(z, 3) for z in z_lo_o)) == 1
+    report("OVERLAP: C/M/Y share one base Z (overlapping)", same_base,
+           f"base_z={z_lo_o}")
+
+    # Segstack card is less degenerate than the old max card but the two
+    # forward models still differ (order-fixed vs sum).
+    uniq_o = len(np.unique(gamut_o["rgb8"], axis=0))
+    uniq_i = len(np.unique(gamut_i["rgb8"], axis=0))
+    report("OVERLAP: segstack card exists (non-empty unique colors)",
+           uniq_o > 100, f"unique rgb8: overlap={uniq_o} interleaved={uniq_i}")
+
+    # dE differs from INTERLEAVED (different forward model); assert they are
+    # NOT identical (order-fixed segstack vs sum).
+    report("OVERLAP: dE differs from INTERLEAVED (distinct forward model)",
+           abs(float(np.median(dE_o)) - float(np.median(dE_i))) > 0.5,
+           f"dE overlap={np.median(dE_o):.2f} interleaved={np.median(dE_i):.2f}")
+
+
 def test_routing():
     """LAYERED/MIXED must be rejected (it was silently rerouted to INTERLEAVED
     before, making LAYERED and INTERLEAVED produce identical geometry)."""
@@ -333,6 +373,7 @@ def test_routing():
 if __name__ == "__main__":
     test_layered_orders()
     test_interleaved()
+    test_overlap()
     test_greyscale()
     test_full_traversal()
     test_stacked_no_floating()
