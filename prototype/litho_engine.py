@@ -340,21 +340,15 @@ def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.
         c_top = z_lo + dC_c
         m_top = c_top + dM_c
         y_top = m_top + dY_c
-        # C box (present where dC > 0)
-        mask_c = dC_c > 0.02
-        verts, faces = _pixel_boxes_mesh(mask_c, dC_c, z_lo, c_top, dx, dy)
-        meshes["C"] = (verts, faces)
-        # M box: spans [c_top, m_top], i.e. thickness dM starting at c_top
-        mask_m = dM_c > 0.02
-        # _pixel_boxes_mesh always starts at z_lo; instead pass z_lo=0 and shift
-        # by c_top after. Simpler: build with z_lo=c_top by offsetting.
-        # We reuse the box builder by passing z_lo=c_top via a wrapper that
-        # translates the built mesh.
-        v2, f2 = _pixel_boxes_mesh(mask_m, dM_c, c_top, m_top, dx, dy)
-        meshes["M"] = (v2, f2)
-        mask_y = dY_c > 0.02
-        v3, f3 = _pixel_boxes_mesh(mask_y, dY_c, m_top, y_top, dx, dy)
-        meshes["Y"] = (v3, f3)
+        # Continuous height fields (NOT per-pixel boxes). STACKED keeps the
+        # physically-correct per-pixel C->M->Y stacked columns: C sits on the
+        # base, M on C's top, Y on M's top — each is a band mesh whose bottom
+        # follows the previous color's top (variable-bottom). This eliminates
+        # the fragmented-island appearance while preserving sum-model physics.
+        MIN_FLOOR = 1e-3
+        meshes["C"] = heightfield_to_mesh(np.maximum(dC_c, MIN_FLOOR), params_cmy, z_offset=z_lo)
+        meshes["M"] = heightfield_band_mesh(c_top, np.maximum(m_top, c_top + MIN_FLOOR), params_cmy)
+        meshes["Y"] = heightfield_band_mesh(m_top, np.maximum(y_top, m_top + MIN_FLOOR), params_cmy)
         # Top relief: bottom follows the tallest column (y_top where present,
         # else m_top / c_top / z_lo), never floats.
         fill_coarse = np.maximum.reduce([y_top, m_top, c_top,
@@ -367,19 +361,21 @@ def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.
         return meshes, dE, gamut, reached
 
     # INTERLEAVED and OVERLAP share the same same-base overlapping geometry:
-    # C/M/Y boxes all start at z_lo and have different heights, so they
-    # overlap in Z. INTERLEAVED matches it with the sum color card (preview
-    # only — printing collapses to max); OVERLAP matches it with the max color
-    # card (what the overlapping geometry actually prints). Fall-through from
-    # both modes reaches this block.
+    # C/M/Y height fields all start at z_lo and have different heights, so
+    # they overlap in Z. INTERLEAVED matches it with the sum color card
+    # (preview only — printing collapses to max); OVERLAP matches it with the
+    # segstack color card (what the overlapping geometry actually prints).
+    # Fall-through from both modes reaches this block.
     dx = params_cmy.width_mm / float(gx_c - 1)
     dy = params_cmy.height_mm / float(gy_c - 1)
     z_lo, z_hi = _color_band_bounds(dW, layer_h, layers_max)  # shared C/M/Y band
+    MIN_FLOOR = 1e-3
     for ch in ("C", "M", "Y"):
         t = _resample(thickness[ch], (gy_c, gx_c))
-        mask = t > 0.02  # ignore sub-membrane thickness
-        verts, faces = _pixel_boxes_mesh(mask, t, z_lo, z_hi, dx, dy)
-        meshes[ch] = (verts, faces)
+        # Continuous height field (NOT per-pixel boxes) starting at the shared
+        # z_lo; tiny floor at 0-thickness pixels. Eliminates fragmented islands
+        # and keeps face count low (2 tris/cell), matching Bambu's geometry.
+        meshes[ch] = heightfield_to_mesh(np.maximum(t, MIN_FLOOR), params_cmy, z_offset=z_lo)
 
     # The top relief layer's bottom must follow the actual C/M/Y fill height
     # (z_lo + max(dC,dM,dY)) per pixel, otherwise it floats in air over pixels
