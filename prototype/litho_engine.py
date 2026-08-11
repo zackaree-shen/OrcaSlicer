@@ -53,6 +53,8 @@ class LithoMode(enum.Enum):
     GREYSCALE = "greyscale"    # single grey relief, no color
     LAYERED = "layered"        # strict Z separation, one color per band
     INTERLEAVED = "interleaved"  # C/M/Y share one Z band (mixed / Bambu B)
+    STACKED = "stacked"        # Bambu-style: per-pixel C->M->Y continuous
+                               # stacked column, zero gap, never floats
 
 
 class ColorOrder(enum.Enum):
@@ -133,9 +135,19 @@ def _pixel_boxes_mesh(mask, thickness, z_lo, z_hi, dx, dy):
 
     Every box is a closed solid (12 triangles), so the union is watertight with
     no thin-membrane artifacts. Boxes are placed from z_lo to z_lo + thickness.
-    thickness is clipped to z_hi - z_lo.
+    z_lo and z_hi may be scalars or per-pixel arrays (thickness is clamped to
+    z_hi - z_lo per pixel). Used for both same-base boxes and stacked columns
+    where each color segment starts at a per-pixel height.
     """
     gy, gx = mask.shape
+    if np.isscalar(z_lo):
+        z_lo_arr = np.full((gy, gx), float(z_lo))
+    else:
+        z_lo_arr = np.asarray(z_lo, dtype=np.float64)
+    if np.isscalar(z_hi):
+        z_hi_arr = np.full((gy, gx), float(z_hi))
+    else:
+        z_hi_arr = np.asarray(z_hi, dtype=np.float64)
     verts = []
     faces = []
     # Box faces: front/back/left/right/top/bottom, CCW outward. Precompute the
@@ -165,20 +177,35 @@ def _pixel_boxes_mesh(mask, thickness, z_lo, z_hi, dx, dy):
         for ix in range(gx):
             if not mask[iy, ix]:
                 continue
-            th = float(np.clip(thickness[iy, ix], 0.0, z_hi - z_lo))
+            lo = z_lo_arr[iy, ix]
+            hi = z_hi_arr[iy, ix]
+            th = float(np.clip(thickness[iy, ix], 0.0, hi - lo))
             if th < 1e-4:
                 continue
             x0 = ix * dx
             y0 = iy * dy
             x1 = (ix + 1) * dx
             y1 = (iy + 1) * dy
-            add_box(x0, y0, z_lo, x1, y1, z_lo + th, len(verts))
+            add_box(x0, y0, lo, x1, y1, lo + th, len(verts))
 
     if not verts:
         # Degenerate: return an empty mesh (caller must handle).
         import numpy as _np
         return _np.zeros((0, 3)), _np.zeros((0, 3), dtype=_np.int64)
     return np.array(verts, dtype=np.float64), np.array(faces, dtype=np.int64)
+
+
+def _nearest_upsample(a, shape):
+    """Nearest-neighbour upsample of a (gy_c, gx_c) array to (gy_f, gx_f).
+
+    Used to carry a coarse-grid field (e.g. color-column fill height) onto the
+    fine top-relief grid without bilinear dilution at box edges.
+    """
+    gy_f, gx_f = shape
+    gy_c0, gx_c0 = a.shape
+    iy = np.clip(np.round(np.linspace(0, gy_c0 - 1, gy_f)).astype(int), 0, gy_c0 - 1)
+    ix = np.clip(np.round(np.linspace(0, gx_c0 - 1, gx_f)).astype(int), 0, gx_c0 - 1)
+    return a[np.ix_(iy, ix)]
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +303,56 @@ def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.
         reached = gamut["rgb8"][idx]
         return meshes, dE, gamut, reached
 
+    if mode == LithoMode.STACKED:
+        # Bambu-style: per-pixel C->M->Y continuous stacked column.
+        # Each pixel is ONE continuous column from z_lo to z_lo + dC + dM + dY,
+        # with C/M/Y occupying contiguous sub-segments (zero internal gap; air
+        # transmits 1.0 so the Beer-Lambert product is unchanged). Every column
+        # starts at the same z_lo (on the white base) -> never floats.
+        #
+        # We emit each color as its own pixel-box layer within the shared band
+        # so the slicer can assign per-color extruders by Z range, matching
+        # Bambu's structure (color boxes stacked within one low Z band).
+        from litho_core import heightfield_band_mesh
+        dx = params_cmy.width_mm / float(gx_c - 1)
+        dy = params_cmy.height_mm / float(gy_c - 1)
+        # Color band starts right above the white base.
+        z_lo = dW + LAYER_GAP
+        dC_c = _resample(dC, (gy_c, gx_c))
+        dM_c = _resample(dM, (gy_c, gx_c))
+        dY_c = _resample(dY, (gy_c, gx_c))
+        # C column: [z_lo, z_lo + dC]
+        # M column: [z_lo + dC, z_lo + dC + dM]   (0-thickness skipped)
+        # Y column: [z_lo + dC + dM, z_lo + dC + dM + dY]
+        c_top = z_lo + dC_c
+        m_top = c_top + dM_c
+        y_top = m_top + dY_c
+        # C box (present where dC > 0)
+        mask_c = dC_c > 0.02
+        verts, faces = _pixel_boxes_mesh(mask_c, dC_c, z_lo, c_top, dx, dy)
+        meshes["C"] = (verts, faces)
+        # M box: spans [c_top, m_top], i.e. thickness dM starting at c_top
+        mask_m = dM_c > 0.02
+        # _pixel_boxes_mesh always starts at z_lo; instead pass z_lo=0 and shift
+        # by c_top after. Simpler: build with z_lo=c_top by offsetting.
+        # We reuse the box builder by passing z_lo=c_top via a wrapper that
+        # translates the built mesh.
+        v2, f2 = _pixel_boxes_mesh(mask_m, dM_c, c_top, m_top, dx, dy)
+        meshes["M"] = (v2, f2)
+        mask_y = dY_c > 0.02
+        v3, f3 = _pixel_boxes_mesh(mask_y, dY_c, m_top, y_top, dx, dy)
+        meshes["Y"] = (v3, f3)
+        # Top relief: bottom follows the tallest column (y_top where present,
+        # else m_top / c_top / z_lo), never floats.
+        fill_coarse = np.maximum.reduce([y_top, m_top, c_top,
+                                         np.full_like(c_top, z_lo)])
+        fill_fine = _nearest_upsample(fill_coarse, (gy_t, gx_t))
+        bot = fill_fine + LAYER_GAP
+        topf = bot + np.maximum(_resample(dTop, (gy_t, gx_t)), MIN_THICKNESS)
+        meshes["top"] = heightfield_band_mesh(bot, topf, params_top)
+        reached = gamut["rgb8"][idx]
+        return meshes, dE, gamut, reached
+
     # INTERLEAVED: C/M/Y share one Z band, pixel boxes only where thickness > 0.
     dx = params_cmy.width_mm / float(gx_c - 1)
     dy = params_cmy.height_mm / float(gy_c - 1)
@@ -302,13 +379,6 @@ def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.
     dM_c = _resample(dM, (gy_c, gx_c))
     dY_c = _resample(dY, (gy_c, gx_c))
     fill_coarse = z_lo + np.maximum.reduce([dC_c, dM_c, dY_c])   # (gy_c, gx_c)
-
-    def _nearest_upsample(a, shape):
-        gy_f, gx_f = shape
-        gy_c0, gx_c0 = a.shape
-        iy = np.clip(np.round(np.linspace(0, gy_c0 - 1, gy_f)).astype(int), 0, gy_c0 - 1)
-        ix = np.clip(np.round(np.linspace(0, gx_c0 - 1, gx_f)).astype(int), 0, gx_c0 - 1)
-        return a[np.ix_(iy, ix)]
 
     fill_fine = _nearest_upsample(fill_coarse, (gy_t, gx_t))
     bot = fill_fine + LAYER_GAP                       # never below the color boxes

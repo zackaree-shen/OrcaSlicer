@@ -213,7 +213,7 @@ class LithophaneApp(tk.Tk):
         # The order dropdown must match the mode:
         #   LAYERED     -> exactly the 6 CMY permutations
         #   INTERLEAVED -> MIXED (Bambu 方案B, same-band)
-        #   GREYSCALE   -> order irrelevant (locked to CMY placeholder)
+        #   GREYSCALE/STACKED -> order locked to CMY (fixed order)
         mode = LithoMode(self.mode_var.get())
         if mode == LithoMode.LAYERED:
             choices = [o.value for o in _ORDER_CMY_ORDER]
@@ -222,7 +222,7 @@ class LithophaneApp(tk.Tk):
         elif mode == LithoMode.INTERLEAVED:
             choices = [ColorOrder.MIXED.value]
             self.order_var.set(ColorOrder.MIXED.value)
-        else:  # GREYSCALE
+        else:  # GREYSCALE / STACKED: fixed CMY order
             choices = [ColorOrder.CMY.value]
             self.order_var.set(ColorOrder.CMY.value)
         self.order_cb.config(values=choices)

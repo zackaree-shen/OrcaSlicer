@@ -233,6 +233,8 @@ def test_full_traversal():
             orders = [ColorOrder.CMY, ColorOrder.YMC]
         elif mode == LithoMode.INTERLEAVED:
             orders = [ColorOrder.MIXED]
+        elif mode == LithoMode.STACKED:
+            orders = [ColorOrder.CMY]
         else:
             orders = [ColorOrder.CMY]
         for o in orders:
@@ -242,6 +244,45 @@ def test_full_traversal():
         assert all(_check_mesh(c, v, f, require_nonempty=False) for c, (v, f) in meshes.items())
     report(f"Traversal: {len(combos)} mode/order combos all watertight", True,
            f"{len(combos)} combos")
+
+
+def test_stacked_no_floating():
+    """STACKED (Bambu-style) must have NO large vertical gaps > 0.3 mm at any
+    pixel — every C/M/Y column starts on the white base or the color below, so
+    nothing floats. LAYERED is known to have these gaps (M/Y hover)."""
+    img = make_test_img()
+    p = LithophaneParams(width_mm=50, height_mm=40, pixel_pitch_mm=1.0)
+
+    def max_gap(meshes, n=30):
+        rng = np.random.default_rng(3)
+        worst = 0.0
+        for _ in range(n):
+            x = float(rng.uniform(3, 47))
+            y = float(rng.uniform(3, 37))
+            bands = []
+            for c in ("W", "C", "M", "Y", "top"):
+                v, f = meshes[c]
+                if len(v) == 0:
+                    continue
+                d = np.sqrt((v[:, 0] - x) ** 2 + (v[:, 1] - y) ** 2)
+                near = v[d < 1.0]
+                if len(near):
+                    bands.append((float(near[:, 2].min()), float(near[:, 2].max())))
+            bands.sort(key=lambda b: b[0])
+            for i in range(len(bands) - 1):
+                worst = max(worst, bands[i + 1][0] - bands[i][1])
+        return worst
+
+    m_s = color_lithophane_engine(img, mode=LithoMode.STACKED, order=ColorOrder.CMY,
+                                  params=p, pitch_cmy=1.0, pitch_top=0.5)[0]
+    m_l = color_lithophane_engine(img, mode=LithoMode.LAYERED, order=ColorOrder.CMY,
+                                  params=p, pitch_cmy=1.0, pitch_top=0.5)[0]
+    g_s = max_gap(m_s)
+    g_l = max_gap(m_l)
+    report("STACKED: no floating (max vertical gap <= 0.3mm)",
+           g_s <= 0.3, f"max_gap={g_s:.2f}mm")
+    report("STACKED gap << LAYERED gap", g_s < g_l - 0.3,
+           f"stacked={g_s:.2f} layered={g_l:.2f}")
 
     # STL round-trip on a LAYERED result.
     meshes, _, _, _ = color_lithophane_engine(img, mode=LithoMode.LAYERED,
@@ -294,6 +335,7 @@ if __name__ == "__main__":
     test_interleaved()
     test_greyscale()
     test_full_traversal()
+    test_stacked_no_floating()
     test_routing()
     test_layer_height_param()
     print()
