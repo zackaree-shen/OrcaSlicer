@@ -202,12 +202,21 @@ class LithophaneApp(tk.Tk):
         self._show_rgb(self.preview_orig, self.rgb, "Original")
         self.btn_build.config(state="normal")
         # Default output size = original image dimensions (1 px = 1 mm),
-        # user can override afterwards.
-        self.w_var.set(float(self.rgb.shape[1]))
-        self.h_var.set(float(self.rgb.shape[0]))
+        # scaled down (preserving aspect ratio) if it exceeds a sane printable
+        # cap, so any image loads without error (a 12000x8000 phone photo
+        # would otherwise exceed the 5000mm cap). User can edit afterwards.
+        MAX_MM = 3000.0
+        w_px = float(self.rgb.shape[1])
+        h_px = float(self.rgb.shape[0])
+        scale = min(1.0, MAX_MM / max(w_px, h_px))
+        w_use = w_px * scale
+        h_use = h_px * scale
+        self.w_var.set(round(w_use))
+        self.h_var.set(round(h_use))
+        clamped = scale < 1.0
         self._log(f"Loaded {os.path.basename(path)}: {self.rgb.shape[1]}x{self.rgb.shape[0]} px\n"
-                  f"Default output size = {self.rgb.shape[1]}x{self.rgb.shape[0]} mm "
-                  f"(1px=1mm, editable)\n"
+                  f"Default output size = {w_use:.0f}x{h_use:.0f} mm "
+                  f"(1px=1mm{' - scaled from ' + str(int(w_px)) + 'x' + str(int(h_px)) + 'px' if clamped else ''}, editable)\n"
                   f"Mode={self.mode_var.get()} Order={self.order_var.get()}\n"
                   f"Auto-rebuild on parameter change is ON")
         self._schedule_auto()
@@ -249,8 +258,8 @@ class LithophaneApp(tk.Tk):
                 raise ValueError(f"{what} must be in [{lo}, {hi}]")
             return val
         params = LithophaneParams(
-            width_mm=gv("w_var", 10, 5000, "Width"),
-            height_mm=gv("h_var", 10, 5000, "Height"),
+            width_mm=gv("w_var", 10, 10000, "Width"),
+            height_mm=gv("h_var", 10, 10000, "Height"),
             pixel_pitch_mm=gv("pitch_var", 0.02, 20.0, "Pixel pitch"),
             base_thickness=gv("dw_var", 0.0, 3.0, "White base"),
         )
