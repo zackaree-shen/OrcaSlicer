@@ -42,7 +42,10 @@ def test_3mf_export(tmp="_3mf_test.3mf"):
         pitch_cmy=1.5, pitch_top=1.0)
 
     parts, offsets, names, extruders = assemble_lithophane_parts(meshes)
-    write_3mf(tmp, parts, offsets, extruders, part_names=names)
+    # Bed-centre placement (Snapmaker U1: 270.5x271 -> centre 135.5, 136).
+    write_3mf(tmp, parts, offsets, extruders, part_names=names,
+              printer_model="Snapmaker U1", printer_settings_id="Snapmaker U1 (0.4 nozzle)",
+              build_center_mm=(135.5, 136.0, 0.0))
 
     # 1. Valid zip with all entries.
     z = zipfile.ZipFile(tmp)
@@ -129,6 +132,15 @@ def test_3mf_export(tmp="_3mf_test.3mf"):
         if abs(cx) > 0.5 or abs(cy) > 0.5:
             ok_center = False
     report("3MF: parts XY-centered on origin", ok_center)
+
+    # 11. Build-item transform places the model at the bed centre.
+    bt = re.search(r'<item objectid="6"[^>]*transform="([^"]+)"', main)
+    bt_vals = [float(x) for x in bt.group(1).split()] if bt else []
+    # 4x3 row-major; translation = cols 9,10,11.
+    ok_bed = (len(bt_vals) >= 12 and abs(bt_vals[9] - 135.5) < 0.01
+              and abs(bt_vals[10] - 136.0) < 0.01)
+    report("3MF: build transform at bed centre (135.5,136)", ok_bed,
+           bt.group(1) if bt else "no build item")
 
     z.close()
     if os.path.exists(tmp):

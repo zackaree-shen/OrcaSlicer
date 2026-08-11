@@ -476,15 +476,22 @@ class LithophaneApp(tk.Tk):
                 return
             path = os.path.join(outdir, "lithophane.3mf")
             variant = "0.4"
+            # Place the model at the centre of the selected printer's bed via
+            # the build-item transform. The parts are already XY-centred
+            # locally, so translating the build item to the bed centre centres
+            # the model on the plate (matches Bambu's exported 3MF, which
+            # writes the bed-centre translation in the build item).
+            bed_center = _BED_CENTERS_MM.get(printer, (0.0, 0.0))
             write_3mf(path, parts, offsets, extruders, part_names=names,
                       printer_model=printer, printer_variant=variant,
                       printer_settings_id=f"{printer} ({variant} nozzle)",
                       filament_vendor=vendor,
-                      build_center_mm=(0.0, 0.0, 0.0))
+                      build_center_mm=(bed_center[0], bed_center[1], 0.0))
             self._log(f"Exported composite 3MF: {path}")
             self._log(f"  parts={names} extruders={extruders}")
             self._log(f"  printer={printer} vendor={vendor} variant={variant}")
-            self._log(f"  infill=100%, per-part filament mapped, model centered")
+            self._log(f"  infill=100%, per-part filament mapped, model at bed centre "
+                      f"({bed_center[0]:.1f},{bed_center[1]:.1f})")
         except Exception as e:  # noqa: BLE001
             self._log(f"3MF export failed: {e}")
 
@@ -510,6 +517,22 @@ class LithophaneApp(tk.Tk):
 # Order list used by _on_mode_change to detect fixed CMY orders.
 _ORDER_CMY_ORDER = [ColorOrder.CMY, ColorOrder.CYM, ColorOrder.MCY,
                     ColorOrder.MYC, ColorOrder.YMC, ColorOrder.YCM]
+
+# Bed centres (mm) per printer, for placing the exported model at the centre
+# of the plate via the 3MF build-item transform. Values from the OrcaSlicer
+# machine presets (resources/profiles/Snapmaker/machine/*.json printable_area):
+#   A250 230x250 -> (115, 125); A350 320x350 -> (160, 175);
+#   Artisan 400x400 -> (200, 200); J1 324x200 -> (162, 100);
+#   U1 270.5x271 -> (135.5, 136). Bambu Lab beds: X1C/P1S 256x256 -> (128,128).
+_BED_CENTERS_MM = {
+    "Snapmaker A250": (115.0, 125.0),
+    "Snapmaker A350": (160.0, 175.0),
+    "Snapmaker Artisan": (200.0, 200.0),
+    "Snapmaker J1": (162.0, 100.0),
+    "Snapmaker U1": (135.5, 136.0),
+    "Bambu Lab X1 Carbon": (128.0, 128.0),
+    "Bambu Lab P1S": (128.0, 128.0),
+}
 
 
 def main():
