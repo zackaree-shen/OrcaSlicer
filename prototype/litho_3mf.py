@@ -107,11 +107,14 @@ def build_submodel(parts):
     return "\n".join(out)
 
 
-def build_mainmodel(composite_id, component_ids, offsets_mm, part_names):
+def build_mainmodel(composite_id, component_ids, offsets_mm, part_names,
+                    build_center_mm=None):
     """composite_id: object id of the composite (e.g. 6).
     component_ids: list of object ids referenced.
     offsets_mm: list of (x,y,z) translation per component (part placed at).
-    part_names: list of names (for metadata only)."""
+    part_names: list of names (for metadata only).
+    build_center_mm: (cx, cy, z0) placed into the build item transform so the
+        model is centered on the plate. None -> identity (OrcaSlicer centers)."""
     out = []
     out.append('<?xml version="1.0" encoding="UTF-8"?>')
     out.append('<model unit="millimeter" xml:lang="en-US" '
@@ -132,9 +135,13 @@ def build_mainmodel(composite_id, component_ids, offsets_mm, part_names):
     out.append('   </components>')
     out.append('  </object>')
     out.append(' </resources>')
+    if build_center_mm is None:
+        bx, by, bz = 0.0, 0.0, 0.0
+    else:
+        bx, by, bz = build_center_mm
     out.append(f' <build p:UUID="{str(uuid.uuid4()).upper()}">')
     out.append(f'  <item objectid="{composite_id}" p:UUID="{str(uuid.uuid4()).upper()}" '
-               f'transform="1 0 0 0 1 0 0 0 1 0 0 0" printable="1"/>')
+               f'transform="1 0 0 0 1 0 0 0 1 {_fmt(bx)} {_fmt(by)} {_fmt(bz)}" printable="1"/>')
     out.append(' </build>')
     out.append('</model>')
     return "\n".join(out)
@@ -167,26 +174,39 @@ def build_model_settings(composite_id, part_names, extruders, infill="100%"):
 
 
 def build_project_settings(filament_colours=None, filament_types=None,
-                           sparse_infill_density="100%", layer_height="0.08"):
+                           sparse_infill_density="100%", layer_height="0.08",
+                           printer_model="Snapmaker U1", printer_variant="0.4",
+                           printer_settings_id=None, filament_vendor="Snapmaker"):
     """Metadata/project_settings.config — print-settings JSON (minimal but valid).
-    OrcaSlicer reads filament_colour for the AMS color display."""
+    OrcaSlicer reads filament_colour for the AMS color display and
+    printer_model / printer_variant for machine matching."""
     if filament_colours is None:
         filament_colours = ["#0080FF", "#FF0080", "#FFFF00", "#FFFFFF"]
     if filament_types is None:
         filament_types = ["PLA", "PLA", "PLA", "PLA"]
+    if printer_settings_id is None:
+        printer_settings_id = f"{printer_model} ({printer_variant} nozzle)"
     settings = {
         "filament_colour": list(filament_colours),
         "filament_type": list(filament_types),
+        "filament_vendor": [filament_vendor] * len(filament_types),
         "sparse_infill_density": sparse_infill_density,
         "layer_height": layer_height,
         "initial_layer_print_height": "0.2",
+        "printer_model": printer_model,
+        "printer_variant": printer_variant,
+        "printer_settings_id": printer_settings_id,
+        "printer_technology": "FFF",
     }
     return json.dumps(settings, indent=4)
 
 
 def write_3mf(path, parts, offsets_mm, extruders, filament_colours=None,
               filament_types=None, sparse_infill_density="100%",
-              layer_height="0.08", composite_id=6, part_names=None):
+              layer_height="0.08", composite_id=6, part_names=None,
+              printer_model="Snapmaker U1", printer_variant="0.4",
+              printer_settings_id=None, filament_vendor="Snapmaker",
+              build_center_mm=None):
     """Write a complete composite 3MF.
 
     parts:        list of (vertices, faces) per part (submodel objects 1..N)
@@ -194,6 +214,12 @@ def write_3mf(path, parts, offsets_mm, extruders, filament_colours=None,
     extruders:    list of 1-based extruder ids per part
     filament_colours: list of hex colours for the AMS (index = extruder-1)
     part_names:   display names per part (default: part_1..part_N)
+    printer_model / printer_variant / printer_settings_id / filament_vendor:
+                  written into Metadata/project_settings.config so OrcaSlicer
+                  can match the machine preset.
+    build_center_mm: (cx, cy, z0) placed into the build item transform so the
+                  model lands centered on the plate. If None, build transform
+                  is identity (OrcaSlicer centers on import).
     """
     if part_names is None:
         part_names = [f"part_{i}" for i in range(1, len(parts) + 1)]
@@ -204,11 +230,14 @@ def write_3mf(path, parts, offsets_mm, extruders, filament_colours=None,
     component_ids = list(range(1, len(parts) + 1))
 
     submodel = build_submodel(list(zip(part_names, *zip(*parts))))
-    mainmodel = build_mainmodel(composite_id, component_ids, offsets_mm, part_names)
+    mainmodel = build_mainmodel(composite_id, component_ids, offsets_mm, part_names,
+                                build_center_mm=build_center_mm)
     model_settings = build_model_settings(composite_id, part_names, extruders,
                                           sparse_infill_density)
-    project_settings = build_project_settings(filament_colours, filament_types,
-                                              sparse_infill_density, layer_height)
+    project_settings = build_project_settings(
+        filament_colours, filament_types, sparse_infill_density, layer_height,
+        printer_model=printer_model, printer_variant=printer_variant,
+        printer_settings_id=printer_settings_id, filament_vendor=filament_vendor)
 
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("[Content_Types].xml", CONTENT_TYPES)
@@ -234,6 +263,10 @@ def assemble_lithophane_parts(meshes, order=None, filament_map=None):
     filament_map: dict color -> extruder id. Default:
             W=4, C=1, M=2, Y=3, top=4  (white shared by W and top).
     Returns (parts, offsets_mm, part_names, extruders).
+
+    All parts are XY-centered around the origin (each part's XY centroid is
+    shifted so the printed plate is centered on the bed), and stacked along Z
+    from z=0 upward with no overlap.
     """
     if order is None:
         order = ["W", "C", "M", "Y", "top"]
@@ -246,15 +279,20 @@ def assemble_lithophane_parts(meshes, order=None, filament_map=None):
         verts, faces = meshes[color]
         if len(verts) == 0 or len(faces) == 0:
             continue
-        # Place each part at its own Z band. The mesh is assumed to start at
-        # z=0 locally (the engine emits absolute Z, so we normalize per part
-        # and use the composite transform to stack them).
-        zmin = float(verts[:, 2].min())
+        # Normalize per part: shift XY to center on origin, and Z to start at 0.
+        # (The engine emits absolute Z; we strip the Z offset and let the
+        # composite transform stack the parts.)
+        verts = np.asarray(verts, dtype=np.float64)
         local = np.array(verts, copy=True)
+        cx = 0.5 * (local[:, 0].min() + local[:, 0].max())
+        cy = 0.5 * (local[:, 1].min() + local[:, 1].max())
+        zmin = float(local[:, 2].min())
+        local[:, 0] -= cx
+        local[:, 1] -= cy
         local[:, 2] -= zmin
         parts.append((local, faces))
         offsets.append((0.0, 0.0, z_cursor))
         names.append(color)
         extruders.append(filament_map[color])
-        z_cursor += float(verts[:, 2].max()) - zmin
+        z_cursor += float(local[:, 2].max())
     return parts, offsets, names, extruders

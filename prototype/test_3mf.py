@@ -109,6 +109,27 @@ def test_3mf_export(tmp="_3mf_test.3mf"):
         ok_ps = False
     report("3MF: project_settings JSON valid", ok_ps)
 
+    # 9. Machine preset written into project_settings.
+    try:
+        ok_machine = (data.get("printer_model") == "Snapmaker U1"
+                      and data.get("printer_variant") == "0.4"
+                      and data.get("printer_settings_id") == "Snapmaker U1 (0.4 nozzle)"
+                      and data.get("filament_vendor") is not None)
+    except Exception:  # noqa: BLE001
+        ok_machine = False
+    report("3MF: machine preset (printer_model/variant/settings_id)", ok_machine,
+           f"model={data.get('printer_model')} variant={data.get('printer_variant')}")
+
+    # 10. XY centering: every part's XY centroid is at the origin.
+    ok_center = True
+    for i, (o, part) in enumerate(zip(offsets, parts)):
+        v = part[0]
+        cx = 0.5 * (v[:, 0].min() + v[:, 0].max())
+        cy = 0.5 * (v[:, 1].min() + v[:, 1].max())
+        if abs(cx) > 0.5 or abs(cy) > 0.5:
+            ok_center = False
+    report("3MF: parts XY-centered on origin", ok_center)
+
     z.close()
     if os.path.exists(tmp):
         os.remove(tmp)

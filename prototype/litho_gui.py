@@ -136,11 +136,36 @@ class LithophaneApp(tk.Tk):
                         command=self._schedule_auto).grid(
             row=row, column=0, columnspan=2, sticky="w"); row += 1
 
+        ttk.Separator(right).grid(row=row, column=0, columnspan=2, sticky="we", pady=6); row += 1
+
+        # Export options: format + vendor/printer.
+        ttk.Label(right, text="Export format:").grid(row=row, column=0, sticky="w", pady=2)
+        self.fmt_var = tk.StringVar(value="3MF")
+        ttk.Combobox(right, textvariable=self.fmt_var, state="readonly",
+                     values=("3MF", "STL"), width=10).grid(
+            row=row, column=1, sticky="we", padx=4, pady=2); row += 1
+
+        ttk.Label(right, text="Vendor:").grid(row=row, column=0, sticky="w", pady=2)
+        self.vendor_var = tk.StringVar(value="Snapmaker")
+        ttk.Combobox(right, textvariable=self.vendor_var, state="readonly",
+                     values=("Snapmaker", "Bambu Lab"), width=10).grid(
+            row=row, column=1, sticky="we", padx=4, pady=2); row += 1
+
+        ttk.Label(right, text="Printer:").grid(row=row, column=0, sticky="w", pady=2)
+        self.printer_var = tk.StringVar(value="Snapmaker U1")
+        self.printer_cb = ttk.Combobox(right, textvariable=self.printer_var, state="readonly",
+                                       values=("Snapmaker U1", "Snapmaker A250",
+                                               "Snapmaker A350", "Snapmaker Artisan",
+                                               "Snapmaker J1", "Bambu Lab X1 Carbon",
+                                               "Bambu Lab P1S"), width=16)
+        self.printer_cb.grid(row=row, column=1, sticky="we", padx=4, pady=2); row += 1
+        self.printer_cb.bind("<<ComboboxSelected>>", lambda e: self._sync_printer())
+
         self.btn_pick = ttk.Button(right, text="1. Choose image...", command=self.pick_image)
         self.btn_pick.grid(row=row, column=0, columnspan=2, sticky="we", pady=(8, 4)); row += 1
         self.btn_build = ttk.Button(right, text="2. Build + preview", command=self.build)
         self.btn_build.grid(row=row, column=0, columnspan=2, sticky="we", pady=2); row += 1
-        self.btn_export = ttk.Button(right, text="3. Export STLs...", command=self.export_stls,
+        self.btn_export = ttk.Button(right, text="3. Export...", command=self.export_stls,
                                      state="disabled")
         self.btn_export.grid(row=row, column=0, columnspan=2, sticky="we", pady=2); row += 1
 
@@ -285,13 +310,49 @@ class LithophaneApp(tk.Tk):
             self._log(f"Build failed: {msg[1]}")
             messagebox.showerror("Build failed", msg[1])
 
+    def _sync_printer(self, _evt=None):
+        """When vendor changes, offer vendor-appropriate printers."""
+        vendor = self.vendor_var.get()
+        if vendor == "Snapmaker":
+            printers = ["Snapmaker U1", "Snapmaker A250", "Snapmaker A350",
+                        "Snapmaker Artisan", "Snapmaker J1"]
+            if self.printer_var.get() not in printers:
+                self.printer_var.set("Snapmaker U1")
+        else:  # Bambu Lab
+            printers = ["Bambu Lab X1 Carbon", "Bambu Lab P1S"]
+            if self.printer_var.get() not in printers:
+                self.printer_var.set("Bambu Lab X1 Carbon")
+        self.printer_cb.config(values=printers)
+
     def export_stls(self):
         if self._last is None or self._building:
             return
         meshes, _, _, mode, order = self._last
+        fmt = self.fmt_var.get()
+        vendor = self.vendor_var.get()
+        printer = self.printer_var.get()
+
+        if fmt == "STL":
+            # Export 5 separate STLs.
+            outdir = filedialog.askdirectory(title="Choose output folder for the 5 STLs")
+            if not outdir:
+                return
+            from litho_core import export_stl
+            names = [("W", "white"), ("C", "cyan"), ("M", "magenta"),
+                     ("Y", "yellow"), ("top", "top_white")]
+            for key, name in names:
+                verts, faces = meshes[key]
+                if len(faces) == 0:
+                    self._log(f"  litho_{name}.stl : skipped (no material)")
+                    continue
+                path = os.path.join(outdir, f"litho_{name}.stl")
+                export_stl(path, verts, faces, name=f"lithophane_{name}")
+                self._log(f"  litho_{name}.stl : {len(faces):,} faces")
+            self._log("Exported 5 STLs (stack aligned on Z).")
+            return
 
         # 3MF composite export (Snapmaker/OrcaSlicer compatible): one object,
-        # per-part filament mapping, 100% infill.
+        # per-part filament mapping, 100% infill, machine preset.
         from litho_3mf import assemble_lithophane_parts, write_3mf
         try:
             parts, offsets, names, extruders = assemble_lithophane_parts(meshes)
@@ -299,10 +360,16 @@ class LithophaneApp(tk.Tk):
             if not outdir:
                 return
             path = os.path.join(outdir, "lithophane.3mf")
-            write_3mf(path, parts, offsets, extruders, part_names=names)
+            variant = "0.4"
+            write_3mf(path, parts, offsets, extruders, part_names=names,
+                      printer_model=printer, printer_variant=variant,
+                      printer_settings_id=f"{printer} ({variant} nozzle)",
+                      filament_vendor=vendor,
+                      build_center_mm=(0.0, 0.0, 0.0))
             self._log(f"Exported composite 3MF: {path}")
             self._log(f"  parts={names} extruders={extruders}")
-            self._log(f"  infill=100%, per-part filament mapped")
+            self._log(f"  printer={printer} vendor={vendor} variant={variant}")
+            self._log(f"  infill=100%, per-part filament mapped, model centered")
         except Exception as e:  # noqa: BLE001
             self._log(f"3MF export failed: {e}")
 
