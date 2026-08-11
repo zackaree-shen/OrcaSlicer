@@ -138,28 +138,36 @@ class LithophaneApp(tk.Tk):
 
         ttk.Separator(right).grid(row=row, column=0, columnspan=2, sticky="we", pady=6); row += 1
 
-        # Export options: format + vendor/printer.
+        # Export options: format + vendor/printer. Vendor/Printer are 3MF-only
+        # (hidden when format == STL).
         ttk.Label(right, text="Export format:").grid(row=row, column=0, sticky="w", pady=2)
         self.fmt_var = tk.StringVar(value="3MF")
-        ttk.Combobox(right, textvariable=self.fmt_var, state="readonly",
-                     values=("3MF", "STL"), width=10).grid(
-            row=row, column=1, sticky="we", padx=4, pady=2); row += 1
+        self.fmt_cb = ttk.Combobox(right, textvariable=self.fmt_var, state="readonly",
+                                   values=("3MF", "STL"), width=10)
+        self.fmt_cb.grid(row=row, column=1, sticky="we", padx=4, pady=2)
+        self.fmt_cb.bind("<<ComboboxSelected>>", lambda e: self._on_fmt_change())
+        row += 1
 
-        ttk.Label(right, text="Vendor:").grid(row=row, column=0, sticky="w", pady=2)
+        self.vendor_lbl = ttk.Label(right, text="Vendor:")
+        self.vendor_lbl.grid(row=row, column=0, sticky="w", pady=2)
         self.vendor_var = tk.StringVar(value="Snapmaker")
-        ttk.Combobox(right, textvariable=self.vendor_var, state="readonly",
-                     values=("Snapmaker", "Bambu Lab"), width=10).grid(
-            row=row, column=1, sticky="we", padx=4, pady=2); row += 1
+        self.vendor_cb = ttk.Combobox(right, textvariable=self.vendor_var, state="readonly",
+                                      values=("Snapmaker", "Bambu Lab"), width=10)
+        self.vendor_cb.grid(row=row, column=1, sticky="we", padx=4, pady=2)
+        self.vendor_cb.bind("<<ComboboxSelected>>", lambda e: self._sync_printer())
+        row += 1
 
-        ttk.Label(right, text="Printer:").grid(row=row, column=0, sticky="w", pady=2)
+        self.printer_lbl = ttk.Label(right, text="Printer:")
+        self.printer_lbl.grid(row=row, column=0, sticky="w", pady=2)
         self.printer_var = tk.StringVar(value="Snapmaker U1")
         self.printer_cb = ttk.Combobox(right, textvariable=self.printer_var, state="readonly",
                                        values=("Snapmaker U1", "Snapmaker A250",
                                                "Snapmaker A350", "Snapmaker Artisan",
                                                "Snapmaker J1", "Bambu Lab X1 Carbon",
                                                "Bambu Lab P1S"), width=16)
-        self.printer_cb.grid(row=row, column=1, sticky="we", padx=4, pady=2); row += 1
+        self.printer_cb.grid(row=row, column=1, sticky="we", padx=4, pady=2)
         self.printer_cb.bind("<<ComboboxSelected>>", lambda e: self._sync_printer())
+        row += 1
 
         self.btn_pick = ttk.Button(right, text="1. Choose image...", command=self.pick_image)
         self.btn_pick.grid(row=row, column=0, columnspan=2, sticky="we", pady=(8, 4)); row += 1
@@ -238,9 +246,9 @@ class LithophaneApp(tk.Tk):
                 raise ValueError(f"{what} must be in [{lo}, {hi}]")
             return val
         params = LithophaneParams(
-            width_mm=gv("w_var", 10, 500, "Width"),
-            height_mm=gv("h_var", 10, 500, "Height"),
-            pixel_pitch_mm=gv("pitch_var", 0.02, 2.0, "Pixel pitch"),
+            width_mm=gv("w_var", 10, 5000, "Width"),
+            height_mm=gv("h_var", 10, 5000, "Height"),
+            pixel_pitch_mm=gv("pitch_var", 0.02, 20.0, "Pixel pitch"),
             base_thickness=gv("dw_var", 0.0, 3.0, "White base"),
         )
         layers = int(gv("layers_var", 1, 30, "Max layers"))
@@ -264,6 +272,40 @@ class LithophaneApp(tk.Tk):
         except ValueError as e:
             messagebox.showerror("Invalid parameter", str(e))
             return
+
+        # ---- Grid-size guard (blocks OOM before it happens) ----
+        # The solver grid scales as width*height/pitch^2, and the geometry
+        # grids (pitch_cmy=0.8, pitch_top=0.25) scale the same way. We clamp the
+        # effective pitch so ALL grids stay bounded (MAX_POINTS), which makes
+        # large images (e.g. 4000x3000 mm from 1px=1mm default) buildable
+        # instead of crashing or hanging.
+        from litho_core import thickness_grid_shape
+        MAX_POINTS = 600_000
+        gx0, gy0 = thickness_grid_shape(self.rgb.shape[0], self.rgb.shape[1], params)
+        n0 = gx0 * gy0
+        # top geometry grid uses base pitch 0.25 (finer than solver 0.3), so its
+        # grid is the binding constraint.
+        n_top0 = (int(params.width_mm / 0.25) + 1) * (int(params.height_mm / 0.25) + 1)
+        worst = max(n0, n_top0)
+        if worst > MAX_POINTS:
+            # thickness_grid_shape uses round(width/pitch)+1, so a safety factor
+            # (1.1) guarantees the rescaled grids are strictly <= MAX_POINTS.
+            scale = (worst / MAX_POINTS) ** 0.5 * 1.1
+            # Raise the user pitch by `scale` so grid points drop below MAX.
+            base_pitch = max(params.pixel_pitch_mm, 1e-3)
+            eff_pitch = base_pitch * scale
+            params = LithophaneParams(
+                width_mm=params.width_mm, height_mm=params.height_mm,
+                pixel_pitch_mm=eff_pitch,
+                base_thickness=params.base_thickness,
+                depth_range=params.depth_range)
+            pitch_cmy = 0.8 * scale
+            pitch_top = 0.25 * scale
+            self._log(f"[auto] grid {worst:,} pts > {MAX_POINTS:,}; "
+                      f"raised pitch to {eff_pitch:.2f}mm to keep it buildable")
+        else:
+            pitch_cmy, pitch_top = 0.8, 0.25
+
         rgb = self.rgb.copy()
         self._building = True
         self.btn_build.config(state="disabled", text="Building... (UI responsive)")
@@ -276,7 +318,7 @@ class LithophaneApp(tk.Tk):
                 meshes, dE, gamut, reached = color_lithophane_engine(
                     rgb, mode=mode, order=order, params=params, td=td,
                     layers_max=layers, layer_h=layer_h, exact=exact,
-                    pitch_cmy=0.8, pitch_top=0.25)
+                    pitch_cmy=pitch_cmy, pitch_top=pitch_top)
                 elapsed = time.time() - t0
                 self._result_q.put(("ok", meshes, dE, gamut, reached, elapsed, params, mode, order))
             except Exception as e:  # noqa: BLE001
@@ -329,6 +371,19 @@ class LithophaneApp(tk.Tk):
             if self.printer_var.get() not in printers:
                 self.printer_var.set("Bambu Lab X1 Carbon")
         self.printer_cb.config(values=printers)
+
+    def _on_fmt_change(self, _evt=None):
+        """Hide 3MF-only controls (Vendor/Printer) when format == STL."""
+        if self.fmt_var.get() == "STL":
+            self.vendor_lbl.grid_remove()
+            self.vendor_cb.grid_remove()
+            self.printer_lbl.grid_remove()
+            self.printer_cb.grid_remove()
+        else:
+            self.vendor_lbl.grid()
+            self.vendor_cb.grid()
+            self.printer_lbl.grid()
+            self.printer_cb.grid()
 
     def export_stls(self):
         if self._last is None or self._building:
