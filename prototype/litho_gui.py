@@ -99,7 +99,7 @@ class LithophaneApp(tk.Tk):
         param_row(row, "Width (mm)", 144.0, "w_var"); row += 1
         param_row(row, "Height (mm)", 108.0, "h_var"); row += 1
         param_row(row, "Max layers / color", 8, "layers_var"); row += 1
-        param_row(row, "Layer height (mm)", 0.08, "layerh_var"); row += 1
+        param_row(row, "Layer height (mm)", 0.2, "layerh_var"); row += 1
         param_row(row, "White base (mm)", 0.30, "dw_var"); row += 1
         param_row(row, "Pixel pitch (mm)", 0.3, "pitch_var"); row += 1
 
@@ -190,7 +190,13 @@ class LithophaneApp(tk.Tk):
             return
         self._show_rgb(self.preview_orig, self.rgb, "Original")
         self.btn_build.config(state="normal")
+        # Default output size = original image dimensions (1 px = 1 mm),
+        # user can override afterwards.
+        self.w_var.set(float(self.rgb.shape[1]))
+        self.h_var.set(float(self.rgb.shape[0]))
         self._log(f"Loaded {os.path.basename(path)}: {self.rgb.shape[1]}x{self.rgb.shape[0]} px\n"
+                  f"Default output size = {self.rgb.shape[1]}x{self.rgb.shape[0]} mm "
+                  f"(1px=1mm, editable)\n"
                   f"Mode={self.mode_var.get()} Order={self.order_var.get()}\n"
                   f"Auto-rebuild on parameter change is ON")
         self._schedule_auto()

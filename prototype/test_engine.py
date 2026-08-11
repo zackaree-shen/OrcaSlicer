@@ -158,6 +158,39 @@ def test_interleaved():
            f"top_bottom_min={float(top_bot.min()):.3f} expect>={min_expected:.3f}")
 
 
+def test_layer_height_param():
+    """Changing layer_h must move the Z bands so they stay strictly separated
+    (LAYERED) / C-M-Y share a band with top following fill (INTERLEAVED)."""
+    img = make_test_img()
+    p = params()
+    for lh in (0.08, 0.2):
+        # LAYERED: strictly increasing Z bands.
+        m = color_lithophane_engine(img, mode=LithoMode.LAYERED,
+                                    order=ColorOrder.CMY, params=p,
+                                    layer_h=lh, pitch_cmy=1.5, pitch_top=1.0)[0]
+        bands = []
+        for c in ("W", "C", "M", "Y", "top"):
+            v = m[c][0]
+            if len(v):
+                bands.append((float(v[:, 2].min()), float(v[:, 2].max())))
+        bands.sort(key=lambda b: b[0])
+        inc = all(bands[i][1] <= bands[i + 1][0] + 0.01 for i in range(len(bands) - 1))
+        report(f"LAYERED layer_h={lh}: Z bands strictly increasing", inc,
+               " ".join(f"[{lo:.1f},{hi:.1f}]" for lo, hi in bands))
+        # C/M/Y all present.
+        ok_cmy = all(len(m[c][1]) > 0 for c in ("C", "M", "Y"))
+        report(f"LAYERED layer_h={lh}: C/M/Y present", ok_cmy)
+
+        # INTERLEAVED: C/M/Y share band; top follows fill (min bottom >= band lo).
+        m2, _, _, _ = color_lithophane_engine(img, mode=LithoMode.INTERLEAVED,
+                                              order=ColorOrder.MIXED, params=p,
+                                              layer_h=lh, pitch_cmy=1.5, pitch_top=1.0)
+        shared = [float(m2[c][0][:, 2].min()) for c in ("C", "M", "Y") if len(m2[c][0])]
+        report(f"INTERLEAVED layer_h={lh}: C/M/Y share one Z band",
+               len(set(round(z, 3) for z in shared)) == 1,
+               f"band_los={shared}")
+
+
 # ---------------------------------------------------------------------------
 # GREYSCALE (M1)
 # ---------------------------------------------------------------------------
@@ -262,6 +295,7 @@ if __name__ == "__main__":
     test_greyscale()
     test_full_traversal()
     test_routing()
+    test_layer_height_param()
     print()
     print(f"{sum(RESULTS)}/{len(RESULTS)} passed")
     sys.exit(0 if all(RESULTS) else 1)

@@ -87,19 +87,41 @@ _ORDER_LETTERS = {
 _COLOR_BASE = {"C": Z_C_BASE, "M": Z_M_BASE, "Y": Z_Y_BASE}
 
 
-def _z_bases_for_order(order: ColorOrder):
+def _band_height(layer_h, layers_max):
+    """Height of one C/M/Y color band in mm (layers_max * layer_h)."""
+    return layers_max * layer_h
+
+
+def _z_bases_for_order(order: ColorOrder, dW=WHITE_THICKNESS,
+                       layer_h=0.08, layers_max=8):
     """Return {color: z_offset} for LAYERED mode under the given order.
 
     The first color in the order sits directly above the white base, the next
     above it, etc. Total stack height is identical regardless of order.
+    Z positions are computed from the actual layer height so they stay valid
+    when the user changes layer_h (e.g. 0.2 mm default).
     """
     letters = _ORDER_LETTERS[order]
-    base = WHITE_THICKNESS + LAYER_GAP
+    band = _band_height(layer_h, layers_max)
+    base = dW + LAYER_GAP
     out = {}
     for ch in letters:
         out[ch] = base
-        base += COLOR_BAND_MAX + LAYER_GAP
+        base += band + LAYER_GAP
     return out
+
+
+def _color_band_bounds(dW=WHITE_THICKNESS, layer_h=0.08, layers_max=8):
+    """Return (z_lo, z_hi) of the shared C/M/Y band (INTERLEAVED mode)."""
+    z_lo = dW + LAYER_GAP
+    z_hi = z_lo + _band_height(layer_h, layers_max)
+    return z_lo, z_hi
+
+
+def _top_base(dW=WHITE_THICKNESS, layer_h=0.08, layers_max=8):
+    """Z offset where the top relief band starts (above the C/M/Y bands)."""
+    z_lo, z_hi = _color_band_bounds(dW, layer_h, layers_max)
+    return z_hi + LAYER_GAP
 
 
 # ---------------------------------------------------------------------------
@@ -239,22 +261,25 @@ def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.
         return meshes, dE, gamut, None
 
     if mode == LithoMode.LAYERED:
-        bases = _z_bases_for_order(order)
+        bases = _z_bases_for_order(order, dW=dW, layer_h=layer_h, layers_max=layers_max)
+        # Top relief sits above the LAST color band (not above the shared band
+        # used by INTERLEAVED).
+        last_base = max(bases.values())
+        top_z = last_base + _band_height(layer_h, layers_max) + LAYER_GAP
         # Resample each color's thickness to the coarse grid and build the
         # height-field in its Z band.
         for ch in ("C", "M", "Y"):
             t = np.maximum(_resample(thickness[ch], (gy_c, gx_c)), MIN_THICKNESS)
             meshes[ch] = heightfield_to_mesh(t, params_cmy, z_offset=bases[ch])
         tTop = np.maximum(_resample(dTop, (gy_t, gx_t)), MIN_THICKNESS)
-        meshes["top"] = heightfield_to_mesh(tTop, params_top, z_offset=Z_TOP_BASE)
+        meshes["top"] = heightfield_to_mesh(tTop, params_top, z_offset=top_z)
         reached = gamut["rgb8"][idx]
         return meshes, dE, gamut, reached
 
     # INTERLEAVED: C/M/Y share one Z band, pixel boxes only where thickness > 0.
     dx = params_cmy.width_mm / float(gx_c - 1)
     dy = params_cmy.height_mm / float(gy_c - 1)
-    z_lo = Z_C_BASE  # all three colors share the same Z band
-    z_hi = z_lo + COLOR_BAND_MAX
+    z_lo, z_hi = _color_band_bounds(dW, layer_h, layers_max)  # shared C/M/Y band
     for ch in ("C", "M", "Y"):
         t = _resample(thickness[ch], (gy_c, gx_c))
         mask = t > 0.02  # ignore sub-membrane thickness
