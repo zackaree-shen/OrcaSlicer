@@ -58,6 +58,14 @@ class LithoMode(enum.Enum):
     OVERLAP = "overlap"        # C/M/Y same-base overlapping boxes + MAX color
                                # model (what overlapping geometry actually
                                # prints) — gamut-collapsed comparison mode
+    BAMBU = "bambu"            # Bambu reference: ONE complete white model
+                               # (base slab + relief plate merged into a
+                               # single part) carries detail + brightness;
+                               # C/M/Y are color channels in a Z band between
+                               # the two white volumes, overlapping each
+                               # other (nC/nM/nY stacked layers). W and CMY
+                               # do not overlap in Z (bilinear fill follow).
+                               # White grid finer than CMY (0.22 vs 0.44mm).
 
 
 class ColorOrder(enum.Enum):
@@ -202,19 +210,6 @@ def _pixel_boxes_mesh(mask, thickness, z_lo, z_hi, dx, dy):
     return np.array(verts, dtype=np.float64), np.array(faces, dtype=np.int64)
 
 
-def _nearest_upsample(a, shape):
-    """Nearest-neighbour upsample of a (gy_c, gx_c) array to (gy_f, gx_f).
-
-    Used to carry a coarse-grid field (e.g. color-column fill height) onto the
-    fine top-relief grid without bilinear dilution at box edges.
-    """
-    gy_f, gx_f = shape
-    gy_c0, gx_c0 = a.shape
-    iy = np.clip(np.round(np.linspace(0, gy_c0 - 1, gy_f)).astype(int), 0, gy_c0 - 1)
-    ix = np.clip(np.round(np.linspace(0, gx_c0 - 1, gx_f)).astype(int), 0, gx_c0 - 1)
-    return a[np.ix_(iy, ix)]
-
-
 # ---------------------------------------------------------------------------
 # Main engine
 # ---------------------------------------------------------------------------
@@ -235,11 +230,12 @@ def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.
         td = DEFAULT_TD
 
     # MIXED is a valid *order label* ONLY for the same-base modes
-    # (INTERLEAVED / OVERLAP, Bambu 方案B). LAYERED + MIXED is a user error
-    # (LAYERED has exactly 6 CMY permutations); do NOT silently reroute it.
-    if order == ColorOrder.MIXED and mode not in (LithoMode.INTERLEAVED, LithoMode.OVERLAP):
+    # (INTERLEAVED / OVERLAP / BAMBU, Bambu 方案B). LAYERED + MIXED is a user
+    # error (LAYERED has exactly 6 CMY permutations); do NOT silently reroute.
+    if order == ColorOrder.MIXED and mode not in (
+            LithoMode.INTERLEAVED, LithoMode.OVERLAP, LithoMode.BAMBU):
         raise ValueError(
-            f"ColorOrder.MIXED only applies to INTERLEAVED/OVERLAP modes, "
+            f"ColorOrder.MIXED only applies to INTERLEAVED/OVERLAP/BAMBU modes, "
             f"got mode={mode.value}. For LAYERED use one of the 6 CMY orders.")
 
     from litho_core import thickness_grid_shape
@@ -248,11 +244,28 @@ def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.
 
     # Gamut + inverse solver. INTERLEAVED/STACKED/LAYERED use the stacked
     # (sum, Beer-Lambert product) model; OVERLAP uses the max model matching
-    # the same-base overlapping geometry it actually prints.
+    # the same-base overlapping geometry it actually prints. BAMBU uses a
+    # dedicated card matching its reference geometry: white = thin base
+    # (z_lo=0.2, like the reference) + relief (dTop), and the C/M/Y band is
+    # capped at the reference band height (band=0.7) so the white relief
+    # plate ALWAYS sits above the color band (never punched through).
     if mode == LithoMode.OVERLAP:
         from litho_color import build_gamut_overlap
         gamut = build_gamut_overlap(layers_max=layers_max, layer_h=layer_h,
                                     top_max=top_max, dW=dW, td=td)
+    elif mode == LithoMode.BAMBU:
+        # Reference (measured lithophane_谢bro_U1): C/M/Y band ~[0.2, 0.9]
+        # (height 0.7), white relief above it up to ~2.28. We fix z_lo=0.2
+        # and band=0.7 so the white plate bottom (= z_lo + band + LAYER_GAP)
+        # is always above the color band top (= z_lo + band). The white
+        # "base" seen by the Beer-Lambert model is z_lo (thin bottom slab),
+        # NOT z_lo + band (that volume is the C/M/Y band, not white).
+        # (that volume is the C/M/Y band, not white).
+        z_lo = 0.2
+        band = 0.7
+        gamut = build_gamut_stacked(
+            layers_max=max(1, int(round(band / layer_h))), layer_h=layer_h,
+            top_max=top_max, dW=z_lo, td=td)
     else:
         gamut = build_gamut_stacked(layers_max=layers_max, layer_h=layer_h,
                                     top_max=top_max, dW=dW, td=td)
@@ -353,10 +366,77 @@ def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.
         # else m_top / c_top / z_lo), never floats.
         fill_coarse = np.maximum.reduce([y_top, m_top, c_top,
                                          np.full_like(c_top, z_lo)])
-        fill_fine = _nearest_upsample(fill_coarse, (gy_t, gx_t))
+        # BILINEAR upsample of the coarse fill top onto the fine grid. A
+        # height-field top IS its bilinear surface, so bilinear sampling is
+        # exact. (_nearest_upsample samples coarse VERTICES, which can sit
+        # below the bilinear surface between vertices -> the top relief would
+        # dip into the C/M/Y columns below and interfere at slicing time;
+        # measured up to -1.06mm on the test image.)
+        fill_fine = _resample(fill_coarse, (gy_t, gx_t))
         bot = fill_fine + LAYER_GAP
         topf = bot + np.maximum(_resample(dTop, (gy_t, gx_t)), MIN_THICKNESS)
         meshes["top"] = heightfield_band_mesh(bot, topf, params_top)
+        reached = gamut["rgb8"][idx]
+        return meshes, dE, gamut, reached
+
+    if mode == LithoMode.BAMBU:
+        # Bambu reference geometry (measured from lithophane_谢bro_U1):
+        #   - W is ONE complete white model: a thin base slab [0, z_lo] plus a
+        #     full-coverage white relief plate above the color band. The two
+        #     white volumes are merged into a single mesh (single part, white
+        #     extruder) so the user sees ONE white body carrying both the
+        #     detail (relief) and the brightness (thickness).
+        #   - C/M/Y are COLOR CHANNELS: one overlapping Z band between the
+        #     white base and the white relief plate (reference CMY band
+        #     ~[0.2, 0.9]). Each position is nC/nM/nY stacked color layers;
+        #     the three channels overlap (interfere).
+        #   - Reference dimensions (measured): z_lo = 0.2 (thin white bottom),
+        #     band = 0.7 (C/M/Y height), white relief up to ~2.28. The band is
+        #     FIXED (not layers_max*layer_h) so the white plate bottom
+        #     (= z_lo + band + LAYER_GAP) always sits ABOVE the color band top
+        #     (= z_lo + band): the slicer's part-order clipping can only hollow
+        #     the band region, never the white relief above it -> no 镂空.
+        #   - White thickness seen by the Beer-Lambert model is z_lo + dTop
+        #     (base slab + relief); the C/M/Y band volume is color, NOT white
+        #     (no double counting — the gamut above was built with dW=z_lo).
+        #   - The white relief plate bottom is sampled BILINEARLY from the
+        #     coarse CMY fill top (a height-field top IS the bilinear surface),
+        #     so the plate never dips into the color band (which would let the
+        #     slicer's part-order clipping hollow out W) and never floats.
+        z_lo = 0.2
+        band = 0.7
+        MIN_FLOOR = 1e-3
+        from litho_core import heightfield_band_mesh
+
+        # --- C/M/Y color channels: same-base overlapping band ---
+        dC_c = _resample(dC, (gy_c, gx_c))
+        dM_c = _resample(dM, (gy_c, gx_c))
+        dY_c = _resample(dY, (gy_c, gx_c))
+        for ch, t in (("C", dC_c), ("M", dM_c), ("Y", dY_c)):
+            meshes[ch] = heightfield_to_mesh(np.maximum(t, MIN_FLOOR), params_cmy,
+                                             z_offset=z_lo)
+
+        # --- White base slab (coarse grid) ---
+        tW_base = np.full((gy_c, gx_c), z_lo)
+        base_v, base_f = heightfield_to_mesh(tW_base, params_cmy, z_offset=0.0)
+
+        # --- White relief plate (fine grid), bottom follows CMY fill top ---
+        fill_coarse = z_lo + np.maximum.reduce([dC_c, dM_c, dY_c])   # coarse fill top
+        # BILINEAR upsample of the coarse fill top onto the fine grid — this
+        # is the exact CMY height-field surface, not a vertex sample.
+        fill_fine = _resample(fill_coarse, (gy_t, gx_t))
+        bot = np.maximum(fill_fine, z_lo + band) + LAYER_GAP  # >= band top + gap
+        topf = bot + np.maximum(_resample(dTop, (gy_t, gx_t)), MIN_THICKNESS)
+        relief_v, relief_f = heightfield_band_mesh(bot, topf, params_top)
+
+        # --- Merge base + relief into ONE white mesh (single W part) ---
+        Wv = np.vstack([base_v, relief_v])
+        Wf = np.vstack([base_f, relief_f + len(base_v)])
+        meshes["W"] = (Wv, Wf)
+
+        # No separate top layer — the brightness relief lives in W.
+        empty = (np.zeros((0, 3)), np.zeros((0, 3), dtype=np.int64))
+        meshes["top"] = empty
         reached = gamut["rgb8"][idx]
         return meshes, dE, gamut, reached
 
@@ -382,20 +462,21 @@ def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.
     # whose color boxes are shorter than the full band. Use a variable-bottom
     # band mesh: bottom = fill top, top = bottom + dTop.
     #
-    # The color boxes live on the COARSE grid; the top relief is on the FINE
-    # grid. A bilinear upsample of the coarse fill would dilute box tops at box
-    # edges and re-open small gaps, so we upsample the fill by NEAREST neighbor:
-    # every fine point takes the fill of the coarse cell it falls in, which is
-    # guaranteed >= that cell's actual box top. The band mesh bottom is then a
-    # staircase that never dips below the material below it.
+    # The color fields live on the COARSE grid; the top relief is on the FINE
+    # grid. The coarse fill top is upsampled BILINEARLY: a height-field top IS
+    # its bilinear surface, so this is exact. (_nearest_upsample samples
+    # coarse vertices, which can sit below the bilinear surface between
+    # vertices, so the relief would dip into the C/M/Y fields and interfere at
+    # slicing time — measured up to -1.15mm on the test image. The previous
+    # "nearest is guaranteed >= box top" comment was wrong.)
     from litho_core import heightfield_band_mesh
     dC_c = _resample(dC, (gy_c, gx_c))
     dM_c = _resample(dM, (gy_c, gx_c))
     dY_c = _resample(dY, (gy_c, gx_c))
     fill_coarse = z_lo + np.maximum.reduce([dC_c, dM_c, dY_c])   # (gy_c, gx_c)
 
-    fill_fine = _nearest_upsample(fill_coarse, (gy_t, gx_t))
-    bot = fill_fine + LAYER_GAP                       # never below the color boxes
+    fill_fine = _resample(fill_coarse, (gy_t, gx_t))
+    bot = fill_fine + LAYER_GAP                       # never below the color fields
     topf = bot + np.maximum(_resample(dTop, (gy_t, gx_t)), MIN_THICKNESS)
     meshes["top"] = heightfield_band_mesh(bot, topf, params_top)
     reached = gamut["rgb8"][idx]

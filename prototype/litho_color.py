@@ -225,9 +225,9 @@ def ciede2000_matrix(lab_targets, lab_gamut):
 # Per-color TD per channel: (TD_R, TD_G, TD_B) in mm.
 # Defaults are v1 coarse estimates (see module docstring for validation notes).
 DEFAULT_TD = {
-    "C": (0.3, 3.0, 3.0),   # cyan absorbs red
-    "M": (3.0, 0.3, 3.0),   # magenta absorbs green
-    "Y": (3.0, 3.0, 0.3),   # yellow absorbs blue
+    "C": (0.5, 3.0, 3.0),   # cyan absorbs red
+    "M": (3.0, 0.5, 3.0),   # magenta absorbs green
+    "Y": (3.0, 3.0, 0.5),   # yellow absorbs blue
     "W": (5.4, 5.4, 5.4),   # white base, product-doc measured
 }
 

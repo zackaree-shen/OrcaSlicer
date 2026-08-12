@@ -116,6 +116,9 @@ class LithoApi:
 
         # Re-triangulate top surface on kept grid: for each kept cell
         # (r, r+step) x (c, c+step), two triangles using top verts.
+        # Also emit the bottom surface (using the bottom verts that were
+        # otherwise orphaned) so the preview shell is closed and visible
+        # from every angle, not just above.
         nf = []
         for ri in range(len(keep_rows) - 1):
             r0 = keep_rows[ri]; r1 = keep_rows[ri + 1]
@@ -128,7 +131,14 @@ class LithoApi:
                 b = pt_index[(r0, c1)][0]
                 c_ = pt_index[(r1, c1)][0]
                 d = pt_index[(r1, c0)][0]
+                # top (CCW, up)
                 nf += [(a, b, c_), (a, c_, d)]
+                # bottom (CW, down)
+                a1 = pt_index[(r0, c0)][1]
+                b1 = pt_index[(r0, c1)][1]
+                c1_ = pt_index[(r1, c1)][1]
+                d1 = pt_index[(r1, c0)][1]
+                nf += [(a1, d1, c1_), (a1, c1_, b1)]
         return {"verts": new_v.ravel().tolist(),
                 "faces": np.array(nf, dtype=np.int64).ravel().tolist()}
 
@@ -181,9 +191,9 @@ class LithoApi:
             mode = LithoMode(params["mode"])
             order = ColorOrder(params.get("order", "CMY"))
             td = {
-                "C": (float(params.get("td_c", 0.3)), 3.0, 3.0),
-                "M": (3.0, float(params.get("td_m", 0.3)), 3.0),
-                "Y": (3.0, 3.0, float(params.get("td_y", 0.3))),
+                "C": (float(params.get("td_c", 0.5)), 3.0, 3.0),
+                "M": (3.0, float(params.get("td_m", 0.5)), 3.0),
+                "Y": (3.0, 3.0, float(params.get("td_y", 0.5))),
                 "W": DEFAULT_TD["W"],
             }
             # Grid guard: cap solver grid like the old GUI (keep interactive).
@@ -193,6 +203,12 @@ class LithoApi:
                 scale = ((gx * gy) / 400_000) ** 0.5
                 p.pixel_pitch_mm = max(p.pixel_pitch_mm * scale, 0.3)
                 pitch_cmy, pitch_top = 0.8 * scale, 0.25 * scale
+            elif mode == LithoMode.BAMBU:
+                # Bambu reference resolution: white texture grid 2x finer than
+                # CMY (measured 0.22 / 0.44mm in lithophane_谢bro_U1), versus
+                # our default 0.25 / 0.8. Keep white ~0.22 but give CMY a
+                # moderate 0.44 so the finer CMY grid stays sliceable.
+                pitch_cmy, pitch_top = 0.44, 0.22
             else:
                 pitch_cmy, pitch_top = 0.8, 0.25
 

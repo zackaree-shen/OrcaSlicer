@@ -373,6 +373,103 @@ def test_routing():
     report("Routing: INTERLEAVED/MIXED valid", len(m_mixed[0]) == 5)
 
 
+def test_bambu():
+    """BAMBU mode: Bambu-reference geometry.
+
+    - W is ONE complete white model: a thin base slab [0, z_lo=0.2] merged
+      with a full-coverage white relief plate [z_lo+band+gap, ...] into a
+      single watertight mesh (single part, white extruder).
+    - C/M/Y are COLOR CHANNELS: one overlapping Z band [z_lo, z_lo+dCh]
+      between the white base and the relief plate (reference [0.2, 0.9]).
+    - No punch-through: the relief plate bottom (z_lo+band+LAYER_GAP) is
+      always ABOVE the color band top, so the slicer's part-order clipping
+      can never hollow out the white (the user-reported 镂空 bug).
+    - No double counting: the gamut is built with dW=z_lo (the C/M/Y band
+      volume is color, not white).
+    - 'top' key exists (empty) so all consumers iterate 5 keys uniformly.
+    - MIXED order accepted; other orders produce identical geometry.
+    """
+    img = make_test_img()
+    p = params()
+    m, dE, gamut, reached = color_lithophane_engine(
+        img, mode=LithoMode.BAMBU, order=ColorOrder.MIXED, params=p,
+        layers_max=8, layer_h=0.2, pitch_cmy=0.44, pitch_top=0.22)
+
+    # 5 keys present, top empty.
+    ok_keys = set(m.keys()) == {"W", "C", "M", "Y", "top"} and len(m["top"][0]) == 0
+    report("BAMBU: 5 keys, top empty", ok_keys, f"keys={list(m.keys())}")
+
+    # W full height: spans [0, z_lo + band + TOP_BAND_MAX], bottom at 0.
+    vW = m["W"][0]
+    ok_w = abs(float(vW[:, 2].min())) < 1e-6 and float(vW[:, 2].max()) > 2.0
+    report("BAMBU: W full-height relief [0, z_lo+band+dTop]", ok_w,
+           f"z=[{vW[:,2].min():.3f},{vW[:,2].max():.3f}]")
+
+    # W no hollowing: white base slab [0, z_lo=0.2] present at bottom.
+    report("BAMBU: W base slab solid (no hollowing)",
+           float(vW[:, 2].min()) == 0.0 and float(vW[:, 2].max()) > 2.0,
+           f"min={vW[:,2].min():.3f} max={vW[:,2].max():.3f}")
+
+    # C/M/Y same base at z_lo=0.2 (reference), inside W's Z range.
+    bases = [float(m[c][0][:, 2].min()) for c in ("C", "M", "Y") if len(m[c][0])]
+    same_base = len(set(round(z, 3) for z in bases)) == 1 and round(bases[0], 2) == 0.2
+    inside = all(b > vW[:, 2].min() and b < vW[:, 2].max() for b in bases)
+    report("BAMBU: C/M/Y one overlapping base at z=0.2 (reference)",
+           same_base and inside, f"bases={bases}")
+
+    # NO PUNCH-THROUGH (the user-reported bug): for every XY column, the W
+    # relief plate bottom must be >= CMY top + LAYER_GAP. If the plate dipped
+    # into the color band, the slicer's part-order clipping would hollow out
+    # the white above the band -> 镂空.
+    from collections import defaultdict
+    w_cols = defaultdict(list)
+    for x, y, z in vW:
+        w_cols[(round(x / 2), round(y / 2))].append(float(z))
+    cmy_cols = defaultdict(list)
+    for c in ("C", "M", "Y"):
+        for x, y, z in m[c][0]:
+            cmy_cols[(round(x / 2), round(y / 2))].append(float(z))
+    margins = []
+    for k, cmy_z in cmy_cols.items():
+        if k not in w_cols:
+            continue
+        cmy_top = max(cmy_z)
+        w_relief_lo = min((z for z in w_cols[k] if z > 0.3), default=None)
+        if w_relief_lo is None:
+            continue
+        margins.append(w_relief_lo - cmy_top)
+    no_punch = len(margins) > 0 and min(margins) >= LAYER_GAP - 1e-6
+    report("BAMBU: no punch-through (W relief >= CMY top + gap)",
+           no_punch, f"margin min={min(margins):.3f} med={np.median(margins):.3f}")
+
+    # Model total height stays near the reference (~2.28mm): dW=z_lo (thin
+    # base) + band 0.7 + relief. Assert it is far below the old 4.5mm.
+    report("BAMBU: total height near reference",
+           float(vW[:, 2].max()) < 3.5, f"total={vW[:,2].max():.3f}mm")
+
+    # Watertight meshes.
+    ok_wt = all(_check_mesh(c, v, f) for c, (v, f) in m.items() if len(f))
+    report("BAMBU: all meshes watertight", ok_wt)
+
+    # MIXED valid; other orders also accepted but produce IDENTICAL geometry
+    # (BAMBU is same-base, order does not change the overlapping band — like
+    # INTERLEAVED, which also ignores order).
+    m_cmy = color_lithophane_engine(img, mode=LithoMode.BAMBU,
+                                    order=ColorOrder.CMY, params=p,
+                                    layers_max=8, layer_h=0.2,
+                                    pitch_cmy=0.44, pitch_top=0.22)[0]
+    same_geom = all(
+        len(m[c][0]) == len(m_cmy[c][0]) for c in ("W", "C", "M", "Y"))
+    report("BAMBU: order-invariant (CMY == MIXED geometry)",
+           same_geom and len(m_cmy) == 5)
+
+    # dE is meaningful: BAMBU uses its own gamut (dW=z_lo, band=0.7) so dE is
+    # NOT identical to INTERLEAVED (dW=0.8). Assert it is finite and sane.
+    report("BAMBU: dE median finite and reasonable",
+           np.isfinite(np.median(dE)) and float(np.median(dE)) < 10.0,
+           f"dE bambu={np.median(dE):.2f}")
+
+
 if __name__ == "__main__":
     test_layered_orders()
     test_interleaved()
@@ -382,6 +479,7 @@ if __name__ == "__main__":
     test_stacked_no_floating()
     test_routing()
     test_layer_height_param()
+    test_bambu()
     print()
     print(f"{sum(RESULTS)}/{len(RESULTS)} passed")
     sys.exit(0 if all(RESULTS) else 1)

@@ -23,8 +23,13 @@ from litho_engine import LithoMode, ColorOrder, color_lithophane_engine
 from litho_3mf import assemble_lithophane_parts, write_3mf
 
 
-def run_mode(rgb, mode, order, outdir, printer="Snapmaker U1"):
-    """Generate one algorithm's meshes and write 3MF + 5 STLs into outdir."""
+def run_mode(rgb, mode, order, outdir, printer="Snapmaker U1",
+             pitch_cmy=None, pitch_top=None):
+    """Generate one algorithm's meshes and write 3MF + 5 STLs into outdir.
+
+    pitch_cmy/pitch_top: optional per-mode grid overrides (BAMBU uses the
+    finer Bambu-reference resolution 0.44 / 0.22mm vs the 0.8 / 0.25 default).
+    """
     os.makedirs(outdir, exist_ok=True)
 
     # Default printable size: long side 144mm, aspect-preserving (matches GUI).
@@ -35,7 +40,8 @@ def run_mode(rgb, mode, order, outdir, printer="Snapmaker U1"):
                               pixel_pitch_mm=0.3)
 
     meshes, dE, gamut, reached = color_lithophane_engine(
-        rgb, mode=mode, order=order, params=params, exact=False)
+        rgb, mode=mode, order=order, params=params, exact=False,
+        pitch_cmy=pitch_cmy or 0.8, pitch_top=pitch_top or 0.25)
 
     # --- 3MF composite export ---
     parts, offsets, names, extruders = assemble_lithophane_parts(meshes)
@@ -68,18 +74,21 @@ def main():
     print(f"Image: {rgb.shape[1]}x{rgb.shape[0]} px")
 
     # All algorithms. LAYERED uses CMY order (the default); others MIXED/CMY.
+    # BAMBU uses the finer Bambu-reference grids (0.44 / 0.22mm).
     jobs = [
-        ("greyscale",  LithoMode.GREYSCALE,   ColorOrder.CMY),
-        ("layered_cmy", LithoMode.LAYERED,    ColorOrder.CMY),
-        ("interleaved", LithoMode.INTERLEAVED, ColorOrder.MIXED),
-        ("stacked",    LithoMode.STACKED,     ColorOrder.CMY),
-        ("overlap",    LithoMode.OVERLAP,     ColorOrder.MIXED),
+        ("greyscale",  LithoMode.GREYSCALE,   ColorOrder.CMY, None, None),
+        ("layered_cmy", LithoMode.LAYERED,    ColorOrder.CMY, None, None),
+        ("interleaved", LithoMode.INTERLEAVED, ColorOrder.MIXED, None, None),
+        ("stacked",    LithoMode.STACKED,     ColorOrder.CMY, None, None),
+        ("overlap",    LithoMode.OVERLAP,     ColorOrder.MIXED, None, None),
+        ("bambu",      LithoMode.BAMBU,       ColorOrder.MIXED, 0.44, 0.22),
     ]
 
-    for name, mode, order in jobs:
+    for name, mode, order, pc, pt in jobs:
         outdir = os.path.join(out_root, name)
         try:
-            params, dE = run_mode(rgb, mode, order, outdir)
+            params, dE = run_mode(rgb, mode, order, outdir,
+                                  pitch_cmy=pc, pitch_top=pt)
             med = float(np.median(dE)) if dE is not None else float("nan")
             print(f"  {name:15s}: size {params.width_mm:.0f}x{params.height_mm:.0f}mm, "
                   f"dE_med={med:.2f}  -> {outdir}")

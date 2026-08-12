@@ -29,17 +29,18 @@ function readParams() {
     layers: parseInt($('layers').value) || 8,
     pitch: parseFloat($('pitch').value) || 0.3,
     dwhite: parseFloat($('dwhite').value) || 0.3,
-    td_c: parseFloat($('tdc').value) || 0.3,
-    td_m: parseFloat($('tdm').value) || 0.3,
-    td_y: parseFloat($('tdy').value) || 0.3,
+    td_c: parseFloat($('tdc').value) || 0.5,
+    td_m: parseFloat($('tdm').value) || 0.5,
+    td_y: parseFloat($('tdy').value) || 0.5,
   };
 }
 
 window.onModeChange = async () => {
-  // INTERLEAVED / OVERLAP lock order to MIXED; LAYERED offers the 6 CMY orders.
+  // INTERLEAVED / OVERLAP / BAMBU lock order to MIXED; LAYERED offers the 6
+  // CMY orders.
   const mode = $('mode').value;
   const order = $('order');
-  if (mode === 'interleaved' || mode === 'overlap') {
+  if (mode === 'interleaved' || mode === 'overlap' || mode === 'bambu') {
     order.value = 'MIXED';
     order.disabled = true;
   } else if (mode === 'layered') {
@@ -138,15 +139,20 @@ const LAYER_COLORS = { W: 0xe2e8f0, C: 0x38bdf8, M: 0xf472b6, Y: 0xfde047, top: 
 
 function init3D() {
   const container = $('three-container');
+  // The 3D tab may be hidden (display:none) on first build -> client size is
+  // 0. Fall back to a sane size; onResize3D() corrects it once the tab is
+  // shown (avoids a 0x0 renderer and NaN aspect at first frame).
+  const w = container.clientWidth || 800;
+  const h = container.clientHeight || 600;
   renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
   renderer.setPixelRatio(window.devicePixelRatio);
-  renderer.setSize(container.clientWidth, container.clientHeight);
+  renderer.setSize(w, h);
   container.appendChild(renderer.domElement);
 
   scene = new THREE.Scene();
   scene.background = new THREE.Color(0x0f1220);
 
-  camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 1000);
+  camera = new THREE.PerspectiveCamera(45, w / h, 0.1, 1000);
   camera.position.set(0, 0, 80);
 
   // Lights
@@ -168,12 +174,12 @@ function init3D() {
     lastX = e.clientX; lastY = e.clientY;
     if (dragBtn === 0) { controls.ry += dx * 0.01; controls.rx += dy * 0.01; }
     else { controls.px += dx; controls.py -= dy; }
-    render3D();
+    refreshView();
   });
   container.addEventListener('wheel', e => {
     e.preventDefault();
     controls.zoom *= e.deltaY > 0 ? 0.92 : 1.08;
-    render3D();
+    refreshView();
   }, { passive: false });
 }
 window.addEventListener('resize', onResize3D);
@@ -181,9 +187,9 @@ function onResize3D() {
   const container = $('three-container');
   if (!renderer) return;
   renderer.setSize(container.clientWidth, container.clientHeight);
-  camera.aspect = container.clientWidth / container.clientHeight;
+  camera.aspect = container.clientWidth / container.clientHeight || 1;
   camera.updateProjectionMatrix();
-  render3D();
+  refreshView();
 }
 
 function render3D(meshes) {
@@ -199,36 +205,49 @@ function render3D(meshes) {
   meshGroup = new THREE.Group();
   scene.add(meshGroup);
 
-  if (meshes) {
-    for (const [color, data] of Object.entries(meshes)) {
-      if (!data || data.verts.length === 0) continue;
-      const geometry = new THREE.BufferGeometry();
-      geometry.setAttribute('position', new THREE.Float32BufferAttribute(data.verts, 3));
-      geometry.setIndex(data.faces);
-      geometry.computeVertexNormals();
-      const mat = new THREE.MeshStandardMaterial({
-        color: LAYER_COLORS[color] || 0x888888,
-        roughness: 0.6, metalness: 0.1,
-        transparent: color === 'top', opacity: color === 'top' ? 0.85 : 1.0,
-      });
-      const mesh = new THREE.Mesh(geometry, mat);
-      // Center on origin.
-      const bb = new THREE.Box3().setFromObject(mesh);
-      const center = bb.getCenter(new THREE.Vector3());
-      mesh.position.sub(center);
-      mesh.visible = layerVisible[color] !== false;
-      meshGroup.add(mesh);
-      layerMeshes[color] = mesh;
-    }
+  const built = [];
+  for (const [color, data] of Object.entries(meshes)) {
+    if (!data || data.verts.length === 0) continue;
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(data.verts, 3));
+    geometry.setIndex(data.faces);
+    geometry.computeVertexNormals();
+    const mat = new THREE.MeshStandardMaterial({
+      color: LAYER_COLORS[color] || 0x888888,
+      roughness: 0.6, metalness: 0.1,
+      transparent: color === 'top', opacity: color === 'top' ? 0.85 : 1.0,
+      side: THREE.DoubleSide,  // decimated preview mesh is a thin shell
+    });
+    const mesh = new THREE.Mesh(geometry, mat);
+    mesh.visible = layerVisible[color] !== false;
+    built.push(mesh);
+    layerMeshes[color] = mesh;
   }
 
-  // Apply view transform (orbit-ish).
+  // Center the WHOLE stack (all layers) once so the Z offsets between
+  // layers survive — per-mesh centering collapses W/C/M/Y/top to z≈0 and
+  // makes the layers interpenetrate. Orbit/pivot = union bbox center.
+  if (built.length) {
+    const bb = new THREE.Box3();
+    for (const m of built) bb.expandByObject(m);
+    const center = bb.getCenter(new THREE.Vector3());
+    for (const m of built) m.position.sub(center);
+  }
+  for (const m of built) meshGroup.add(m);
+
+  refreshView();
+}
+
+// Interaction-only refresh: apply the orbit transform to the EXISTING
+// meshGroup and re-render. Never disposes/rebuilds — calling render3D()
+// without data used to wipe the model (dispose + empty group rebuild).
+function refreshView() {
+  if (!meshGroup) return;
   meshGroup.rotation.x = controls.rx;
   meshGroup.rotation.y = controls.ry;
   meshGroup.scale.setScalar(controls.zoom * 0.6);
   meshGroup.position.x = controls.px;
   meshGroup.position.y = controls.py;
-
   renderer.render(scene, camera);
 }
 
@@ -236,7 +255,7 @@ function render3D(meshes) {
 function toggleLayer(color, visible) {
   layerVisible[color] = visible;
   if (layerMeshes[color]) layerMeshes[color].visible = visible;
-  renderer.render(scene, camera);
+  refreshView();
 }
 
 /* ===== Boot ===== */
