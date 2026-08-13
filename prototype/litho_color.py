@@ -765,15 +765,23 @@ def _smooth_top_resolve(dTop, dC, dM, dY, dE, idx, flat_lab, gamut,
         cand_t = gamut_t[nbrs]
         span[s:e] = cand_t[..., 0].max(axis=1) - cand_t[..., 0].min(axis=1)
     span = span.reshape(h, w)
-    # Blend weight: rise from 0 (low degeneracy, keep detail) to ~1 (high
-    # degeneracy, smooth away flip-flop). Threshold = one top_step is where
-    # near-equal candidates start (top_tol); beyond ~6 steps is fully
-    # degenerate (spans 2.0mm on mid-gray).
-    w_deg = np.clip((span - top_tol) / (6 * top_tol), 0.0, 1.0)
+    # Chroma-aware partitioned tolerance: neutral pixels (low C*) get tight
+    # tolerance (strong smoothing, kills spike — dE cost ~0 because NN is
+    # degenerate there); saturated pixels get loose tolerance (keep dTop
+    # freedom, preserve color — NN is forced there, dTop≈0).
+    chroma = np.sqrt(flat_lab[:, 1] ** 2 + flat_lab[:, 2] ** 2).reshape(h, w)
+    # C*<5 -> tol 0.1 (tight); C*>20 -> tol 0.5 (loose); linear between.
+    tol_map = np.clip(0.1 + (chroma - 5.0) / 15.0 * (top_tol - 0.1), 0.1, top_tol)
+    # Blend weight also rises faster in low-chroma (neutral) regions.
+    w_deg = np.clip((span - tol_map) / (6 * tol_map), 0.0, 1.0)
+    # Extra smoothing weight for neutral pixels (where spikes come from).
+    neutral_boost = np.clip(1.0 - chroma / 10.0, 0.0, 1.0)[:, None]  # placeholder
+    w_deg = np.maximum(w_deg, neutral_boost.reshape(h, w) * 0.8)
 
     dTop_s = (1.0 - w_deg) * dTop + w_deg * gaussian_filter(dTop, sigma=3.0)
-    # Re-solve (dC,dM,dY) with dTop in [dTop_s-tol, dTop_s+tol].
+    # Re-solve (dC,dM,dY) with dTop in [dTop_s-tol, dTop_s+tol] (per-pixel tol).
     dTop_s_f = dTop_s.ravel()
+    tol_f = tol_map.ravel()
     res_t = np.empty((n, 4)); res_dE = np.empty(n); res_idx = np.empty(n, dtype=np.int64)
     for s in range(0, n, chunk):
         e = min(s + chunk, n)
@@ -786,7 +794,8 @@ def _smooth_top_resolve(dTop, dC, dM, dY, dE, idx, flat_lab, gamut,
         cand_t = gamut_t[nbrs]
         dtop_cand = cand_t[..., 0]
         dtop_target = dTop_s_f[s:e, None]
-        in_band = np.abs(dtop_cand - dtop_target) <= top_tol
+        tol_pix = tol_f[s:e, None]
+        in_band = np.abs(dtop_cand - dtop_target) <= tol_pix
         # Guard: if NO candidate falls in the band (possible when the smoothed
         # dTop sits between card steps outside the top-k neighbors), fall back
         # to the band's nearest candidate instead of a 1e9 empty-argmin.
