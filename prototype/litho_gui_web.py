@@ -216,7 +216,10 @@ class LithoApi:
             meshes, dE, gamut, reached = color_lithophane_engine(
                 self.rgb, mode=mode, order=order, params=p, td=td,
                 layers_max=layers, layer_h=layer_h, exact=False,
-                pitch_cmy=pitch_cmy, pitch_top=pitch_top)
+                pitch_cmy=pitch_cmy, pitch_top=pitch_top,
+                dW=float(params.get("dwhite", 0.8)),
+                top_max=float(params.get("maxthick", 2.0)) - float(params.get("dwhite", 0.8)),
+                carve=params.get("carve", "concave"))
             elapsed = time.time() - t0
 
             self.last_meshes = meshes

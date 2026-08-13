@@ -147,11 +147,15 @@ def build_mainmodel(composite_id, component_ids, offsets_mm, part_names,
     return "\n".join(out)
 
 
-def build_model_settings(composite_id, part_names, extruders, infill="100%"):
+def build_model_settings(composite_id, part_names, extruders, infill="100%",
+                         layer_height="0.2"):
     """Metadata/model_settings.config — per-part filament + 100% infill.
 
-    part_names: list of part names (match submodel object order 1..N).
-    extruders: list of extruder ids (1-based) per part.
+    Mirrors the Bambu reference (lithophane_谢bro_U1.3mf): object-level
+    layer_height (object config OVERRIDES the process preset at slice time),
+    sparse_infill_density=100%, sparse_infill_pattern=zig-zag, and part-level
+    extruder mapping. part_names: list of part names (match submodel object
+    order 1..N); extruders: list of extruder ids (1-based) per part.
     """
     out = []
     out.append('<?xml version="1.0" encoding="UTF-8"?>')
@@ -159,7 +163,9 @@ def build_model_settings(composite_id, part_names, extruders, infill="100%"):
     out.append(f'  <object id="{composite_id}">')
     out.append(f'    <metadata key="name" value="{_xml_escape(part_names[0])}"/>')
     out.append('    <metadata key="extruder" value="0"/>')
+    out.append(f'    <metadata key="layer_height" value="{layer_height}"/>')
     out.append(f'    <metadata key="sparse_infill_density" value="{infill}"/>')
+    out.append('    <metadata key="sparse_infill_pattern" value="zig-zag"/>')
     for i, (name, extruder) in enumerate(zip(part_names, extruders), start=1):
         out.append(f'    <part id="{i}" subtype="normal_part">')
         out.append(f'      <metadata key="name" value="{_xml_escape(name)}"/>')
@@ -173,26 +179,139 @@ def build_model_settings(composite_id, part_names, extruders, infill="100%"):
     return "\n".join(out)
 
 
-def build_project_settings(filament_colours=None, filament_types=None,
-                           sparse_infill_density="100%", layer_height="0.08",
-                           printer_model="Snapmaker U1", printer_variant="0.4",
-                           printer_settings_id=None, filament_vendor="Snapmaker"):
-    """Metadata/project_settings.config — print-settings JSON (minimal but valid).
-    OrcaSlicer reads filament_colour for the AMS color display and
-    printer_model / printer_variant for machine matching."""
-    if filament_colours is None:
-        filament_colours = ["#0080FF", "#FF0080", "#FFFF00", "#FFFFFF"]
-    if filament_types is None:
-        filament_types = ["PLA", "PLA", "PLA", "PLA"]
+# ---------------------------------------------------------------------------
+# Preset templates (filament / process / machine) — extracted from the
+# measured Bambu reference 3MF (lithophane_谢bro_U1) and parameterized.
+# OrcaSlicer matches presets by *exact* name; the three _settings_1.config
+# files provide the presets, and project_settings.config links them via
+# filament_settings_id / print_settings_id / printer_settings_id.
+# ---------------------------------------------------------------------------
+
+_PRESET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "3mf_templates")
+
+
+def _load_preset_template(name):
+    """Load a JSON preset template (filament/process/machine) from 3mf_templates/."""
+    path = os.path.join(_PRESET_DIR, f"{name}_settings_1.config")
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _set_keys(d, pairs):
+    for k, v in pairs:
+        if k in d:
+            d[k] = v
+
+
+def build_filament_settings(preset_suffix="", filament_type="PLA",
+                            filament_vendor="Generic",
+                            filament_colours=None):
+    """Metadata/filament_settings_1.config — full PLA preset (from reference)."""
+    d = _load_preset_template("filament")
+    suffix = f"({preset_suffix})" if preset_suffix else ""
+    n = 5 if filament_colours is None else len(filament_colours)
+    sid = [f"{filament_vendor} {filament_type}{suffix}"] * n
+    _set_keys(d, [
+        ("name", f"{filament_vendor} {filament_type}{suffix}"),
+        ("filament_settings_id", sid),
+        ("filament_type", [filament_type] * n),
+        ("filament_vendor", [filament_vendor] * n),
+    ])
+    if filament_colours is not None:
+        d["default_filament_colour"] = list(filament_colours)
+    return json.dumps(d, indent=4, ensure_ascii=False)
+
+
+def build_process_settings(preset_suffix="", layer_height="0.2",
+                           sparse_infill_density="100%",
+                           printer_model="Snapmaker U1",
+                           printer_variant="0.4"):
+    """Metadata/process_settings_1.config — full process preset (from reference).
+
+    The reference preset targets BBL A1; we REWRITE compatible_printers to the
+    target machine so OrcaSlicer applies it (exact-name matching). Without
+    this the process preset is judged incompatible and silently dropped.
+    """
+    d = _load_preset_template("process")
+    suffix = f"({preset_suffix})" if preset_suffix else ""
+    machine = f"{printer_model} ({printer_variant} nozzle)"
+    _set_keys(d, [
+        ("name", f"0.20mm Standard @{machine}{suffix}"),
+        ("print_settings_id", f"0.20mm Standard @{machine}{suffix}"),
+        ("compatible_printers", [machine]),
+        ("compatible_printers_condition", ""),
+        ("layer_height", str(layer_height)),
+        ("initial_layer_print_height", str(layer_height)),
+        ("sparse_infill_density", sparse_infill_density),
+    ])
+    return json.dumps(d, indent=4, ensure_ascii=False)
+
+
+def build_machine_settings(preset_suffix="", printer_model="Snapmaker U1",
+                           printer_variant="0.4",
+                           printer_settings_id=None):
+    """Metadata/machine_settings_1.config — full machine preset (from reference).
+
+    printer_settings_id must MATCH project_settings.config exactly: we use the
+    system-preset name 'Snapmaker U1 (0.4 nozzle)' (parenthesized, matches the
+    installed preset) so the machine is selected on import. (The reference is
+    internally inconsistent here — its embedded machine preset is dead code.)
+    """
+    d = _load_preset_template("machine")
+    suffix = f"({preset_suffix})" if preset_suffix else ""
     if printer_settings_id is None:
         printer_settings_id = f"{printer_model} ({printer_variant} nozzle)"
+    machine = f"{printer_model} ({printer_variant} nozzle)"
+    _set_keys(d, [
+        ("name", f"{printer_model} {printer_variant} nozzle{suffix}"),
+        ("printer_model", printer_model),
+        ("printer_variant", printer_variant),
+        ("printer_settings_id", printer_settings_id),
+        ("default_print_profile", f"0.20mm Standard @{machine}{suffix}"),
+    ])
+    return json.dumps(d, indent=4, ensure_ascii=False)
+
+
+def build_project_settings(filament_colours=None, filament_types=None,
+                           sparse_infill_density="100%", layer_height="0.2",
+                           printer_model="Snapmaker U1", printer_variant="0.4",
+                           printer_settings_id=None, filament_vendor="Generic",
+                           preset_suffix="", filament_settings_id=None,
+                           print_settings_id=None):
+    """Metadata/project_settings.config — print-settings JSON.
+
+    Contains the preset-name links that make OrcaSlicer select the machine /
+    process / filament presets: printer_settings_id (machine), print_settings_id
+    (process), filament_settings_id (list, one per AMS slot), plus
+    print_compatible_printers so the process preset's own compatible_printers
+    is overridden (B1: without this, the process preset is dropped for U1).
+    """
+    if filament_colours is None:
+        # Reference slot order: slot1=white(W), slot2=cyan(C), slot3=magenta(M),
+        # slot4=yellow(Y), slot5=black(support). Matches extruder map W=1,C=2,
+        # M=3,Y=4,top=1.
+        filament_colours = ["#FFFFFF", "#0086D6", "#EC008C", "#F4EE2A", "#222222"]
+    if filament_types is None:
+        filament_types = ["PLA", "PLA", "PLA", "PLA", "PLA"]
+    n = len(filament_colours)
+    if printer_settings_id is None:
+        printer_settings_id = f"{printer_model} ({printer_variant} nozzle)"
+    suffix = f"({preset_suffix})" if preset_suffix else ""
+    if filament_settings_id is None:
+        filament_settings_id = [f"{filament_vendor} {filament_types[0]}{suffix}"] * n
+    if print_settings_id is None:
+        print_settings_id = f"0.20mm Standard @{printer_model} ({printer_variant} nozzle){suffix}"
     settings = {
         "filament_colour": list(filament_colours),
         "filament_type": list(filament_types),
-        "filament_vendor": [filament_vendor] * len(filament_types),
+        "filament_vendor": [filament_vendor] * n,
+        "filament_settings_id": list(filament_settings_id),
+        "print_settings_id": print_settings_id,
+        "print_compatible_printers": [printer_settings_id],
         "sparse_infill_density": sparse_infill_density,
-        "layer_height": layer_height,
-        "initial_layer_print_height": "0.2",
+        "layer_height": str(layer_height),
+        "initial_layer_print_height": str(layer_height),
         "printer_model": printer_model,
         "printer_variant": printer_variant,
         "printer_settings_id": printer_settings_id,
@@ -203,10 +322,10 @@ def build_project_settings(filament_colours=None, filament_types=None,
 
 def write_3mf(path, parts, offsets_mm, extruders, filament_colours=None,
               filament_types=None, sparse_infill_density="100%",
-              layer_height="0.08", composite_id=6, part_names=None,
+              layer_height="0.2", composite_id=6, part_names=None,
               printer_model="Snapmaker U1", printer_variant="0.4",
-              printer_settings_id=None, filament_vendor="Snapmaker",
-              build_center_mm=None):
+              printer_settings_id=None, filament_vendor="Generic",
+              build_center_mm=None, preset_suffix=""):
     """Write a complete composite 3MF.
 
     parts:        list of (vertices, faces) per part (submodel objects 1..N)
@@ -215,17 +334,21 @@ def write_3mf(path, parts, offsets_mm, extruders, filament_colours=None,
     filament_colours: list of hex colours for the AMS (index = extruder-1)
     part_names:   display names per part (default: part_1..part_N)
     printer_model / printer_variant / printer_settings_id / filament_vendor:
-                  written into Metadata/project_settings.config so OrcaSlicer
-                  can match the machine preset.
+                  written into the preset configs so OrcaSlicer matches presets.
+    preset_suffix: e.g. project name -> '(suffix)' appended to the preset ids.
     build_center_mm: (cx, cy, z0) placed into the build item transform so the
                   model lands centered on the plate. If None, build transform
                   is identity (OrcaSlicer centers on import).
+
+    Writes the full 5-file preset set (filament/process/machine/project/model
+    settings) mirroring the measured Bambu reference 3MF.
     """
     if part_names is None:
         part_names = [f"part_{i}" for i in range(1, len(parts) + 1)]
     if filament_colours is None:
-        n = max(max(extruders), 4) if extruders else 4
-        filament_colours = ["#0080FF", "#FF0080", "#FFFF00", "#FFFFFF"][:n]
+        # Reference slots: 1=W(white), 2=C(cyan), 3=M(magenta), 4=Y(yellow),
+        # 5=support(black). Default map W=1,C=2,M=3,Y=4,top=1 -> 5 slots.
+        filament_colours = ["#FFFFFF", "#0086D6", "#EC008C", "#F4EE2A", "#222222"]
 
     component_ids = list(range(1, len(parts) + 1))
 
@@ -233,11 +356,20 @@ def write_3mf(path, parts, offsets_mm, extruders, filament_colours=None,
     mainmodel = build_mainmodel(composite_id, component_ids, offsets_mm, part_names,
                                 build_center_mm=build_center_mm)
     model_settings = build_model_settings(composite_id, part_names, extruders,
-                                          sparse_infill_density)
+                                          sparse_infill_density, layer_height)
     project_settings = build_project_settings(
         filament_colours, filament_types, sparse_infill_density, layer_height,
         printer_model=printer_model, printer_variant=printer_variant,
-        printer_settings_id=printer_settings_id, filament_vendor=filament_vendor)
+        printer_settings_id=printer_settings_id, filament_vendor=filament_vendor,
+        preset_suffix=preset_suffix)
+    filament_settings = build_filament_settings(
+        preset_suffix, filament_vendor=filament_vendor,
+        filament_colours=filament_colours)
+    process_settings = build_process_settings(
+        preset_suffix, layer_height, sparse_infill_density,
+        printer_model, printer_variant)
+    machine_settings = build_machine_settings(
+        preset_suffix, printer_model, printer_variant, printer_settings_id)
 
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("[Content_Types].xml", CONTENT_TYPES)
@@ -247,6 +379,9 @@ def write_3mf(path, parts, offsets_mm, extruders, filament_colours=None,
         z.writestr("3D/Objects/litho.stl_1.model", submodel)
         z.writestr("Metadata/model_settings.config", model_settings)
         z.writestr("Metadata/project_settings.config", project_settings)
+        z.writestr("Metadata/filament_settings_1.config", filament_settings)
+        z.writestr("Metadata/process_settings_1.config", process_settings)
+        z.writestr("Metadata/machine_settings_1.config", machine_settings)
     return path
 
 
@@ -271,7 +406,10 @@ def assemble_lithophane_parts(meshes, order=None, filament_map=None):
     if order is None:
         order = ["W", "C", "M", "Y", "top"]
     if filament_map is None:
-        filament_map = {"W": 4, "C": 1, "M": 2, "Y": 3, "top": 4}
+        # Bambu reference mapping (measured lithophane_谢bro_U1 model_settings):
+        # W texture=1, margin=1, C=2, M=3, Y=4. Our 'top' is white like W, so it
+        # shares extruder 1 (reference has no separate top part).
+        filament_map = {"W": 1, "C": 2, "M": 3, "Y": 4, "top": 1}
 
     parts, offsets, names, extruders = [], [], [], []
     for color in order:

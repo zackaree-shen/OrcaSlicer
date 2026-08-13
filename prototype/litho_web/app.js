@@ -32,6 +32,9 @@ function readParams() {
     td_c: parseFloat($('tdc').value) || 0.5,
     td_m: parseFloat($('tdm').value) || 0.5,
     td_y: parseFloat($('tdy').value) || 0.5,
+    dwhite: parseFloat($('dwhite').value) || 0.8,
+    maxthick: parseFloat($('maxthick').value) || 2.8,
+    carve: $('carve').value,
   };
 }
 

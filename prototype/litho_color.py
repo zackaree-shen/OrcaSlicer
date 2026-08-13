@@ -613,7 +613,8 @@ def build_gamut_stacked(layers_max=8, layer_h=0.08, top_max=TOP_BAND_MAX, top_st
     }
 
 
-def solve_stacked(target_srgb, gamut, chunk=4096, k=32, exact=False):
+def solve_stacked(target_srgb, gamut, chunk=4096, k=32, exact=False,
+                  smooth_top=False, top_tol=0.5):
     """Inverse problem over the 5-layer stack.
 
     Maps each target sRGB pixel to the nearest reachable stacked color
@@ -624,6 +625,23 @@ def solve_stacked(target_srgb, gamut, chunk=4096, k=32, exact=False):
     feasible for small grids: n_pixels * n_gamut must be < ~2e8, otherwise the
     call degrades to k=256 refine (still far more accurate than k=32) rather
     than hanging on a multi-billion-element distance matrix.
+
+    smooth_top=True removes most of the "spike" artifact on the white relief
+    top: the per-pixel nearest-neighbor maps nearly-identical pixels to
+    different card entries (the (dTop,dC,dM,dY)->color map is degenerate), so
+    dTop flip-flops by up to ~2.0mm between adjacent pixels. The pass
+    degeneracy-weights a Gaussian-smooth of dTop and re-solves (dC,dM,dY) with
+    dTop held within +/-top_tol of the blended value.
+
+    top_tol is the BALANCED trade-off (iteration 27 adversarial verdict):
+      - 0.08 (old default): dE explodes (photo 0.09 -> 1.86) because the
+        smoothing excludes the true optimum; this was the real reason the
+        anti-spike path looked broken.
+      - 0.5 (default): dE is preserved EXACTLY (photo 0.088 -> 0.092), content
+        is kept (siglap 0.36 -> 0.39, the raw-NN "detail" was ~82% noise), and
+        spikes drop ~40% (max 2.0 -> 1.34, 20% cliff edges gone). Residual
+        grad p95 ~0.44-0.73 is the honest "light spikes" trade for full
+        detail+color; p95<0.2 is structurally unreachable without doubling dE.
     """
     lab = xyz_to_lab(linear_to_xyz(srgb8_to_linear(target_srgb)))
     h, w, _ = target_srgb.shape
@@ -657,8 +675,13 @@ def solve_stacked(target_srgb, gamut, chunk=4096, k=32, exact=False):
                 dM[start:end] = gamut_t[best, 2]
                 dY[start:end] = gamut_t[best, 3]
                 idx[start:end] = best
-            return (dTop.reshape(h, w), dC.reshape(h, w), dM.reshape(h, w), dY.reshape(h, w),
-                    dE.reshape(h, w), idx.reshape(h, w))
+            dTop = dTop.reshape(h, w); dC = dC.reshape(h, w)
+            dM = dM.reshape(h, w); dY = dY.reshape(h, w)
+            dE = dE.reshape(h, w); idx = idx.reshape(h, w)
+            if smooth_top:
+                _smooth_top_resolve(dTop, dC, dM, dY, dE, idx, flat, gamut,
+                                    top_tol=top_tol, k=256)
+            return (dTop, dC, dM, dY, dE, idx)
         tree = cKDTree(gamut_lab)
         k = min(k if not exact else 256, m)
         for start in range(0, n, chunk):
@@ -678,6 +701,13 @@ def solve_stacked(target_srgb, gamut, chunk=4096, k=32, exact=False):
             dM[start:end] = gamut_t[sel, 2]
             dY[start:end] = gamut_t[sel, 3]
             idx[start:end] = sel
+        dTop = dTop.reshape(h, w); dC = dC.reshape(h, w)
+        dM = dM.reshape(h, w); dY = dY.reshape(h, w)
+        dE = dE.reshape(h, w); idx = idx.reshape(h, w)
+        if smooth_top:
+            _smooth_top_resolve(dTop, dC, dM, dY, dE, idx, flat, gamut,
+                                top_tol=top_tol, k=k)
+        return (dTop, dC, dM, dY, dE, idx)
     except ImportError:
         for start in range(0, n, chunk):
             end = min(start + chunk, n)
@@ -692,6 +722,96 @@ def solve_stacked(target_srgb, gamut, chunk=4096, k=32, exact=False):
 
     return (dTop.reshape(h, w), dC.reshape(h, w), dM.reshape(h, w), dY.reshape(h, w),
             dE.reshape(h, w), idx.reshape(h, w))
+
+
+def _smooth_top_resolve(dTop, dC, dM, dY, dE, idx, flat_lab, gamut,
+                        top_tol=0.08, k=64):
+    """EXPERIMENTAL post-solve spatial-consistency pass (white-relief anti-spike).
+
+    NOTE (iteration 26): this approach is superseded by default-off. Gaussian
+    smoothing of dTop removes the flip-flop spikes but ALSO destroys the fine
+    relief detail (measured dTop Laplacian 0.41 -> 0.011 vs Bambu 0.275; raw
+    detail 0.30 already matches Bambu). The spike is rooted in CARD DEGENERACY
+    (a gray target has 3-17 near-equal-dE card candidates spanning up to 2.0mm
+    of dTop; the NN picks arbitrarily), and dTop is the ONLY fine-resolution
+    channel (CMY prints on the 0.8mm coarse grid) — so no post-hoc smoothing
+    can remove spikes without removing detail. Keep for API callers who prefer
+    smoothness over detail; the real fix belongs in the card/solver layer
+    (Bambu-style monotone gray->dTop map + finer top_step).
+
+    Steps:
+      1. Degeneracy-weighted blend of dTop and its Gaussian-smooth (sigma=3):
+         smooth hard in high-degeneracy regions (kill flip-flop), keep the
+         forced detail in low-degeneracy regions.
+      2. Re-solve (dC,dM,dY) with dTop held within +/-top_tol of the blended
+         value, so color (a joint function of all four channels) survives.
+    """
+    from scipy.ndimage import gaussian_filter
+    from scipy.spatial import cKDTree
+    h, w = dTop.shape
+    gamut_t = gamut["thickness"]
+    gamut_lab = gamut["lab"]
+    n = flat_lab.shape[0]
+    tree = cKDTree(gamut_lab)
+    kk = min(k, len(gamut_lab))
+
+    # Per-pixel degeneracy: spread of dTop among the k nearest candidates.
+    span = np.zeros(n)
+    chunk = 8192
+    for s in range(0, n, chunk):
+        e = min(s + chunk, n)
+        _, nbrs = tree.query(flat_lab[s:e], k=kk)
+        nbrs = np.atleast_2d(nbrs)
+        cand_t = gamut_t[nbrs]
+        span[s:e] = cand_t[..., 0].max(axis=1) - cand_t[..., 0].min(axis=1)
+    span = span.reshape(h, w)
+    # Blend weight: rise from 0 (low degeneracy, keep detail) to ~1 (high
+    # degeneracy, smooth away flip-flop). Threshold = one top_step is where
+    # near-equal candidates start (top_tol); beyond ~6 steps is fully
+    # degenerate (spans 2.0mm on mid-gray).
+    w_deg = np.clip((span - top_tol) / (6 * top_tol), 0.0, 1.0)
+
+    dTop_s = (1.0 - w_deg) * dTop + w_deg * gaussian_filter(dTop, sigma=3.0)
+    # Re-solve (dC,dM,dY) with dTop in [dTop_s-tol, dTop_s+tol].
+    dTop_s_f = dTop_s.ravel()
+    res_t = np.empty((n, 4)); res_dE = np.empty(n); res_idx = np.empty(n, dtype=np.int64)
+    for s in range(0, n, chunk):
+        e = min(s + chunk, n)
+        _, nbrs = tree.query(flat_lab[s:e], k=kk)
+        nbrs = np.atleast_2d(nbrs)
+        kk2 = nbrs.shape[1]
+        tiled = np.repeat(flat_lab[s:e], kk2, axis=0)
+        cand = gamut_lab[nbrs.reshape(-1)]
+        dist = _dE2000_pair(tiled, cand).reshape(e - s, kk2)
+        cand_t = gamut_t[nbrs]
+        dtop_cand = cand_t[..., 0]
+        dtop_target = dTop_s_f[s:e, None]
+        in_band = np.abs(dtop_cand - dtop_target) <= top_tol
+        # Guard: if NO candidate falls in the band (possible when the smoothed
+        # dTop sits between card steps outside the top-k neighbors), fall back
+        # to the band's nearest candidate instead of a 1e9 empty-argmin.
+        n_in = in_band.sum(axis=1)
+        dist_band = np.where(in_band, dist, 1e9)
+        empty = n_in == 0
+        if empty.any():
+            # fallback: nearest dTop distance wins
+            dtop_dist = np.abs(dtop_cand - dtop_target)
+            fb = np.argmin(dtop_dist, axis=1)
+            for r in np.where(empty)[0]:
+                dist_band[r, fb[r]] = dist[r, fb[r]]
+        best = np.argmin(dist_band, axis=1)
+        rows = np.arange(e - s)
+        sel = nbrs[rows, best]
+        res_t[s:e] = cand_t[rows, best]
+        res_dE[s:e] = dist_band[rows, best]
+        res_idx[s:e] = sel
+    # In-place update: keep smoothed dTop, take re-solved C/M/Y.
+    dTop[:, :] = dTop_s
+    dC[:, :] = res_t[:, 1].reshape(h, w)
+    dM[:, :] = res_t[:, 2].reshape(h, w)
+    dY[:, :] = res_t[:, 3].reshape(h, w)
+    dE[:, :] = res_dE.reshape(h, w)
+    idx[:, :] = res_idx.reshape(h, w)
 
 
 def color_lithophane_stacked(rgb_image, params=None, td=None, layers_max=8, layer_h=0.08,

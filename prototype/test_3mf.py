@@ -4,14 +4,18 @@ Checks:
   - the exported 3MF is a valid zip with all required entries
   - every XML is well-formed
   - the composite object references exactly the 5 part meshes
-  - per-part extruder mapping is written correctly (W=4,C=1,M=2,Y=3,top=4)
-  - object-level sparse_infill_density == 100%
+  - per-part extruder mapping is written correctly (W=1,C=2,M=3,Y=4,top=1,
+    Bambu reference mapping)
+  - the full 5-file preset set is present (filament/process/machine/project/
+    model settings) with consistent preset ids + print_compatible_printers
+  - object-level sparse_infill_density == 100% and layer_height == 0.2
   - offsets stack the parts without overlap (Z strictly increasing)
   - meshes inside the sub-model are watertight solids
 """
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -45,20 +49,26 @@ def test_3mf_export(tmp="_3mf_test.3mf"):
     # Bed-centre placement (Snapmaker U1: 270.5x271 -> centre 135.5, 136).
     write_3mf(tmp, parts, offsets, extruders, part_names=names,
               printer_model="Snapmaker U1", printer_settings_id="Snapmaker U1 (0.4 nozzle)",
-              build_center_mm=(135.5, 136.0, 0.0))
+              build_center_mm=(135.5, 136.0, 0.0), preset_suffix="lithophane")
 
-    # 1. Valid zip with all entries.
+    # 1. Valid zip with all entries (full 5-file preset set).
     z = zipfile.ZipFile(tmp)
     entries = set(z.namelist())
     required = {"[Content_Types].xml", "_rels/.rels", "3D/3dmodel.model",
                 "3D/_rels/3dmodel.model.rels", "3D/Objects/litho.stl_1.model",
-                "Metadata/model_settings.config", "Metadata/project_settings.config"}
+                "Metadata/model_settings.config", "Metadata/project_settings.config",
+                "Metadata/filament_settings_1.config",
+                "Metadata/process_settings_1.config",
+                "Metadata/machine_settings_1.config"}
     report("3MF: all required entries present", required.issubset(entries),
            f"{len(entries)} entries")
 
     # 2. All XML well-formed.
     ok_xml = True
-    for n in required - {"Metadata/project_settings.config"}:
+    for n in required - {"Metadata/project_settings.config",
+                         "Metadata/filament_settings_1.config",
+                         "Metadata/process_settings_1.config",
+                         "Metadata/machine_settings_1.config"}:
         try:
             md.parseString(z.read(n))
         except Exception as e:  # noqa: BLE001
@@ -71,17 +81,43 @@ def test_3mf_export(tmp="_3mf_test.3mf"):
     comps = re.findall(r'<component[^>]*objectid="(\d+)"', main)
     report("3MF: composite has 5 parts", len(comps) == 5, f"{len(comps)} components")
 
-    # 4. Per-part extruder mapping.
+    # 4. Per-part extruder mapping (Bambu reference: W=1,C=2,M=3,Y=4,top=1).
     ms = z.read("Metadata/model_settings.config").decode()
     extruder_map = dict(re.findall(
         r'<part id="(\d+)"[^>]*>.*?extruder" value="(\d+)"', ms, re.DOTALL))
-    expected = {"1": "4", "2": "1", "3": "2", "4": "3", "5": "4"}
-    report("3MF: part extruder mapping", extruder_map == expected, str(extruder_map))
+    expected = {"1": "1", "2": "2", "3": "3", "4": "4", "5": "1"}
+    report("3MF: part extruder mapping (Bambu ref)", extruder_map == expected,
+           str(extruder_map))
 
-    # 5. Infill 100% at object level.
+    # 5. Infill 100% + layer_height 0.2 at object level.
     infill = re.search(r'sparse_infill_density" value="([^"]+)"', ms)
-    report("3MF: object infill 100%", infill is not None and infill.group(1) == "100%",
-           infill.group(1) if infill else "none")
+    lh = re.search(r'layer_height" value="([^"]+)"', ms)
+    report("3MF: object infill 100% + layer_height 0.2",
+           infill is not None and infill.group(1) == "100%"
+           and lh is not None and lh.group(1) == "0.2",
+           f"infill={infill.group(1) if infill else 'none'} "
+           f"layer_h={lh.group(1) if lh else 'none'}")
+
+    # 5b. Preset set is consistent: machine/project printer_settings_id match,
+    # process preset is compatible with U1, project links all three ids.
+    fs = json.loads(z.read("Metadata/filament_settings_1.config"))
+    ps_ = json.loads(z.read("Metadata/process_settings_1.config"))
+    mch = json.loads(z.read("Metadata/machine_settings_1.config"))
+    proj = json.loads(z.read("Metadata/project_settings.config"))
+    sid = "Snapmaker U1 (0.4 nozzle)"
+    ok_presets = (
+        mch.get("printer_settings_id") == sid
+        and proj.get("printer_settings_id") == sid
+        and ps_.get("compatible_printers") == [sid]
+        and proj.get("print_compatible_printers") == [sid]
+        and proj.get("print_settings_id") == ps_.get("print_settings_id")
+        and proj.get("filament_settings_id") == fs.get("filament_settings_id")
+        and proj.get("layer_height") == "0.2"
+        and len(proj.get("filament_colour", [])) == 5
+    )
+    report("3MF: preset set consistent (ids link, U1-compatible)",
+           ok_presets,
+           f"mch={mch.get('printer_settings_id')} proj={proj.get('printer_settings_id')}")
 
     # 6. Offsets stack without overlap.
     ztops = []
@@ -105,7 +141,6 @@ def test_3mf_export(tmp="_3mf_test.3mf"):
     # 8. project_settings valid JSON with filament colours.
     ps = z.read("Metadata/project_settings.config").decode()
     try:
-        import json
         data = json.loads(ps)
         ok_ps = "filament_colour" in data and len(data["filament_colour"]) >= 4
     except Exception:  # noqa: BLE001
@@ -144,7 +179,10 @@ def test_3mf_export(tmp="_3mf_test.3mf"):
 
     z.close()
     if os.path.exists(tmp):
-        os.remove(tmp)
+        try:
+            os.remove(tmp)
+        except PermissionError:  # noqa: S110
+            pass
 
 
 if __name__ == "__main__":

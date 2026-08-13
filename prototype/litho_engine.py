@@ -217,7 +217,8 @@ def _pixel_boxes_mesh(mask, thickness, z_lo, z_hi, dx, dy):
 def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.CMY,
                             params=None, td=None, layers_max=8, layer_h=0.08,
                             dW=WHITE_THICKNESS, top_max=TOP_BAND_MAX, exact=False,
-                            pitch_cmy=0.8, pitch_top=0.25):
+                            pitch_cmy=0.8, pitch_top=0.25, smooth_top=True,
+                            carve="concave"):
     """Generate lithophane meshes under a given mode and color order.
 
     Returns (meshes, dE, gamut, reached_rgb) where meshes maps color -> mesh.
@@ -269,7 +270,8 @@ def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.
     else:
         gamut = build_gamut_stacked(layers_max=layers_max, layer_h=layer_h,
                                     top_max=top_max, dW=dW, td=td)
-    dTop, dC, dM, dY, dE, idx = solve_stacked(small, gamut, exact=exact)
+    dTop, dC, dM, dY, dE, idx = solve_stacked(small, gamut, exact=exact,
+                                              smooth_top=smooth_top)
 
     thickness = {"C": dC, "M": dM, "Y": dY, "top": dTop, "W": np.full_like(dTop, dW)}
 
@@ -426,8 +428,21 @@ def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.
         # is the exact CMY height-field surface, not a vertex sample.
         fill_fine = _resample(fill_coarse, (gy_t, gx_t))
         bot = np.maximum(fill_fine, z_lo + band) + LAYER_GAP  # >= band top + gap
-        topf = bot + np.maximum(_resample(dTop, (gy_t, gx_t)), MIN_THICKNESS)
-        relief_v, relief_f = heightfield_band_mesh(bot, topf, params_top)
+        dTop_fine = np.maximum(_resample(dTop, (gy_t, gx_t)), MIN_THICKNESS)
+        if carve == "concave":
+            # 阴刻: top face is flat at H_max, relief carved DOWN into the
+            # bottom face. H_max = bot + top_max (highest point). Dark pixels
+            # (large dTop) carve deeper; bright pixels (small dTop) stay near
+            # the top. Light path = dTop (same as convex — mathematically
+            # equivalent, but the VISIBLE top surface is now flat).
+            H_max = bot + top_max
+            topf = H_max
+            relief_bot = H_max - dTop_fine
+        else:
+            # 阳刻 (convex, original): bottom follows fill, top = bot + dTop.
+            topf = bot + dTop_fine
+            relief_bot = bot
+        relief_v, relief_f = heightfield_band_mesh(relief_bot, topf, params_top)
 
         # --- Merge base + relief into ONE white mesh (single W part) ---
         Wv = np.vstack([base_v, relief_v])
