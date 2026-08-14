@@ -218,7 +218,8 @@ def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.
                             params=None, td=None, layers_max=8, layer_h=0.08,
                             dW=WHITE_THICKNESS, top_max=TOP_BAND_MAX, exact=False,
                             pitch_cmy=0.8, pitch_top=0.10, smooth_top=True,
-                            carve="concave", sharpen=2.0, contrast=1.5):
+                            carve="concave", sharpen=2.0, contrast=1.5,
+                            tone_map=True):
     """Generate lithophane meshes under a given mode and color order.
 
     sharpen/contrast: image preprocessing applied to the luminance channel
@@ -244,6 +245,14 @@ def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.
             f"got mode={mode.value}. For LAYERED use one of the 6 CMY orders.")
 
     from litho_core import thickness_grid_shape
+    # P1a: Beer-Lambert tone mapping BEFORE solving (iteration 41 research:
+    # linear luminance->thickness crushes shadows; invert the physics).
+    # Use the SAME dW the gamut will use (BAMBU gamut builds with z_lo=0.2).
+    if tone_map and mode == LithoMode.BAMBU:
+        from litho_color import tone_mapping_preprocess
+        _tm_dW = 0.2 if mode == LithoMode.BAMBU else dW
+        rgb_image = tone_mapping_preprocess(rgb_image, td_w=td["W"][0], d_w=_tm_dW,
+                                            top_max=top_max)
     # Image preprocessing (sharpen + contrast on luminance, hue-preserving).
     # Applied BEFORE solving so the solver sees crisper edges.
     if sharpen > 0 or abs(contrast - 1.0) > 1e-6:
@@ -281,6 +290,28 @@ def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.
                                     top_max=top_max, dW=dW, td=td)
     dTop, dC, dM, dY, dE, idx = solve_stacked(small, gamut, exact=exact,
                                               smooth_top=smooth_top)
+
+    # P1b: spike surgery on dTop AFTER the solver pipeline. The result is a
+    # CONTINUOUS field — geometry uses it directly (discrete card entries
+    # only ever supplied CMY). dE is recomputed from the forward model so
+    # the reported accuracy reflects the actual printed geometry.
+    if tone_map and mode == LithoMode.BAMBU:
+        from litho_color import spike_surgery, forward_stacked, \
+            xyz_to_lab, linear_to_xyz, srgb8_to_linear, linear_to_srgb8, \
+            ciede2000_matrix
+        dTop = spike_surgery(dTop, t_sigma=1.5, iterations=5, top_max=top_max)
+        # Recompute dE (subsampled) for the actual thickness + solver CMY.
+        # Use the same dW the gamut used (BAMBU: z_lo=0.2).
+        _fwd_dW = 0.2 if mode == LithoMode.BAMBU else dW
+        _tau = forward_stacked(dTop, dC, dM, dY, td=td, dW=_fwd_dW).reshape(-1, 3)
+        _rgb_p = linear_to_srgb8(np.clip(_tau, 0, 1)).reshape(-1, 3)
+        _lab_t = xyz_to_lab(linear_to_xyz(srgb8_to_linear(small))).reshape(-1, 3)
+        _lab_p = xyz_to_lab(linear_to_xyz(srgb8_to_linear(
+            _rgb_p.reshape(-1, 1, 3).astype(np.uint8)))).reshape(-1, 3)
+        _sub = np.linspace(0, _lab_t.shape[0] - 1, min(20000, _lab_t.shape[0])).astype(int)
+        from litho_color import _dE2000_pair
+        _med = float(np.median(_dE2000_pair(_lab_t[_sub], _lab_p[_sub])))
+        dE = np.full_like(dTop, _med)
 
     thickness = {"C": dC, "M": dM, "Y": dY, "top": dTop, "W": np.full_like(dTop, dW)}
 

@@ -643,6 +643,44 @@ def preprocess_image(rgb, sharpen=0.5, contrast=1.3):
     return np.clip(rgb_f * ratio[..., None], 0, 255).astype(np.uint8)
 
 
+def tone_mapping_preprocess(rgb, td_w=5.4, d_w=0.5, top_max=1.5):
+    """P1a: Beer-Lambert tone mapping (iteration 41 research).
+
+    Linear luminance->thickness crushes shadows (measured: Y=0-64 -> only
+    14 perceptual levels). Invert the physics instead: d ∝ -log10(luminance)
+    so optical density is linear. Academic: Alexa & Matusik TOG 2010.
+    """
+    rgb_f = rgb.astype(np.float64) / 255.0
+    lin = np.where(rgb_f <= 0.04045, rgb_f / 12.92, ((rgb_f + 0.055) / 1.055) ** 2.4)
+    lum = np.clip(0.299 * lin[..., 0] + 0.587 * lin[..., 1] + 0.114 * lin[..., 2], 1e-4, 1.0)
+    d_target = np.clip(-td_w * np.log10(lum) - d_w, 0, top_max)
+    Y_tone = (1 - d_target / top_max) * 255.0
+    Y_orig = 0.299 * rgb_f[..., 0] + 0.587 * rgb_f[..., 1] + 0.114 * rgb_f[..., 2]
+    ratio = np.clip(Y_tone / 255.0 / (Y_orig + 1e-6), 0, 3)
+    return (np.clip(rgb_f * ratio[..., None], 0, 1) * 255).astype(np.uint8)
+
+
+def spike_surgery(dT, t_sigma=1.5, iterations=5, top_max=1.5):
+    """P1b: local spike surgery (Kerber-inspired outlier gradient removal).
+
+    Replaces outlier-gradient pixels (NN degeneracy spikes) with their 3x3
+    neighborhood median. Local surgery preserves the global thickness
+    distribution (unlike Poisson rebuilds which drifted dE to 2.9-9.2).
+    The result is a CONTINUOUS field — geometry should use it directly
+    (not the discrete card entries).
+    """
+    from scipy.ndimage import median_filter
+    h = np.asarray(dT, dtype=np.float64).copy()
+    for _ in range(iterations):
+        hy, hx = np.gradient(h)
+        gmag = np.hypot(hy, hx)
+        outlier = gmag > t_sigma * gmag.std()
+        if not outlier.any():
+            break
+        h = np.where(outlier, median_filter(h, size=3), h)
+    return np.clip(h, 0, top_max)
+
+
 def solve_stacked(target_srgb, gamut, chunk=4096, k=32, exact=False,
                   smooth_top=False, top_tol=0.5):
     """Inverse problem over the 5-layer stack.
