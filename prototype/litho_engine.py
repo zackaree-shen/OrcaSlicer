@@ -217,7 +217,7 @@ def _pixel_boxes_mesh(mask, thickness, z_lo, z_hi, dx, dy):
 def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.CMY,
                             params=None, td=None, layers_max=8, layer_h=0.08,
                             dW=WHITE_THICKNESS, top_max=TOP_BAND_MAX, exact=False,
-                            pitch_cmy=0.8, pitch_top=0.25, smooth_top=True,
+                            pitch_cmy=0.8, pitch_top=0.10, smooth_top=True,
                             carve="concave", sharpen=2.0, contrast=1.5):
     """Generate lithophane meshes under a given mode and color order.
 
