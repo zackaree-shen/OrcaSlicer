@@ -288,18 +288,23 @@ def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.
     else:
         gamut = build_gamut_stacked(layers_max=layers_max, layer_h=layer_h,
                                     top_max=top_max, dW=dW, td=td)
+    # P1 path (BAMBU + tone_map) replaces _smooth_top_resolve entirely with
+    # spike surgery: running BOTH was double smoothing (measured -38% detail
+    # gradient vs the standalone-validated config). Solve raw, then denoise
+    # once with surgery (t=1.5, it=2: p95=0.240, max detail retention).
+    _p1 = tone_map and mode == LithoMode.BAMBU
     dTop, dC, dM, dY, dE, idx = solve_stacked(small, gamut, exact=exact,
-                                              smooth_top=smooth_top)
+                                              smooth_top=smooth_top and not _p1)
 
     # P1b: spike surgery on dTop AFTER the solver pipeline. The result is a
     # CONTINUOUS field — geometry uses it directly (discrete card entries
     # only ever supplied CMY). dE is recomputed from the forward model so
     # the reported accuracy reflects the actual printed geometry.
-    if tone_map and mode == LithoMode.BAMBU:
+    if _p1:
         from litho_color import spike_surgery, forward_stacked, \
             xyz_to_lab, linear_to_xyz, srgb8_to_linear, linear_to_srgb8, \
             ciede2000_matrix
-        dTop = spike_surgery(dTop, t_sigma=1.5, iterations=5, top_max=top_max)
+        dTop = spike_surgery(dTop, t_sigma=1.5, iterations=2, top_max=top_max)
         # Recompute dE (subsampled) for the actual thickness + solver CMY.
         # Use the same dW the gamut used (BAMBU: z_lo=0.2).
         _fwd_dW = 0.2 if mode == LithoMode.BAMBU else dW
