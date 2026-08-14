@@ -430,16 +430,16 @@ def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.
         bot = np.maximum(fill_fine, z_lo + band) + LAYER_GAP  # >= band top + gap
         dTop_fine = np.maximum(_resample(dTop, (gy_t, gx_t)), MIN_THICKNESS)
         if carve == "concave":
-            # 阴刻: top face is flat at H_max, relief carved DOWN into the
-            # bottom face. H_max = bot + top_max (highest point). Dark pixels
-            # (large dTop) carve deeper; bright pixels (small dTop) stay near
-            # the top. Light path = dTop (same as convex — mathematically
-            # equivalent, but the VISIBLE top surface is now flat).
-            H_max = bot + top_max
-            topf = H_max
-            relief_bot = H_max - dTop_fine
+            # 凹刻（用户修正后的正确语义）：
+            # 顶面随 dTop 起伏（凸起状，不是平面！）——暗处（dTop 大）顶面高，
+            # 亮处（dTop 小）顶面低（"向下刻蚀"）。整体看着是凸起的浮雕。
+            # 与凸刻的区别：底面完全平整（固定在 CMY 带顶+gap，不跟随 fill），
+            # 像从一块平整底板上凸起的浮雕；凸刻底面跟随 CMY fill（有起伏）。
+            flat_bot = z_lo + band + LAYER_GAP
+            relief_bot = np.full_like(dTop_fine, flat_bot)
+            topf = flat_bot + dTop_fine
         else:
-            # 阳刻 (convex, original): bottom follows fill, top = bot + dTop.
+            # 凸刻（阳刻）：底面跟随 fill，顶面 = bot + dTop
             topf = bot + dTop_fine
             relief_bot = bot
         relief_v, relief_f = heightfield_band_mesh(relief_bot, topf, params_top)
