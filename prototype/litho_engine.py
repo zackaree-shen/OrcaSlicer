@@ -218,12 +218,12 @@ def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.
                             params=None, td=None, layers_max=8, layer_h=0.08,
                             dW=WHITE_THICKNESS, top_max=TOP_BAND_MAX, exact=False,
                             pitch_cmy=0.8, pitch_top=0.25, smooth_top=True,
-                            carve="concave", sharpen=0.5, contrast=1.3):
+                            carve="concave", sharpen=2.0, contrast=1.5):
     """Generate lithophane meshes under a given mode and color order.
 
     sharpen/contrast: image preprocessing applied to the luminance channel
     BEFORE solving (hue-preserving). Improves edge sharpness / detail in the
-    relief. Default sharpen=0.5, contrast=1.3 (mild).
+    relief. Default sharpen=2.0, contrast=1.5 (mild).
 
     Returns (meshes, dE, gamut, reached_rgb) where meshes maps color -> mesh.
     Keys: 'W','C','M','Y','top' always present (C/M/Y boxes may be empty in

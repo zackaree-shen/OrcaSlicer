@@ -772,7 +772,7 @@ def _guided_filter(p, I, r=8, eps=0.05):
 
 
 def _smooth_top_resolve(dTop, dC, dM, dY, dE, idx, flat_lab, gamut,
-                        top_tol=0.08, k=64, smooth_sigma=1.0, guide_r=8, guide_eps=0.05):
+                        top_tol=0.08, k=64, smooth_sigma=1.0, guide_r=4, guide_eps=0.005):
     """EXPERIMENTAL post-solve spatial-consistency pass (white-relief anti-spike).
 
     NOTE (iteration 26): this approach is superseded by default-off. Gaussian
