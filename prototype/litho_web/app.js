@@ -35,6 +35,8 @@ function readParams() {
     dwhite: parseFloat($('dwhite').value) || 0.8,
     maxthick: parseFloat($('maxthick').value) || 2.8,
     carve: $('carve').value,
+    sharpen: parseFloat($('sharpen').value) || 0.5,
+    contrast: parseFloat($('contrast').value) || 1.3,
   };
 }
 

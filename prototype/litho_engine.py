@@ -218,8 +218,12 @@ def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.
                             params=None, td=None, layers_max=8, layer_h=0.08,
                             dW=WHITE_THICKNESS, top_max=TOP_BAND_MAX, exact=False,
                             pitch_cmy=0.8, pitch_top=0.25, smooth_top=True,
-                            carve="concave"):
+                            carve="concave", sharpen=0.5, contrast=1.3):
     """Generate lithophane meshes under a given mode and color order.
+
+    sharpen/contrast: image preprocessing applied to the luminance channel
+    BEFORE solving (hue-preserving). Improves edge sharpness / detail in the
+    relief. Default sharpen=0.5, contrast=1.3 (mild).
 
     Returns (meshes, dE, gamut, reached_rgb) where meshes maps color -> mesh.
     Keys: 'W','C','M','Y','top' always present (C/M/Y boxes may be empty in
@@ -240,6 +244,11 @@ def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.
             f"got mode={mode.value}. For LAYERED use one of the 6 CMY orders.")
 
     from litho_core import thickness_grid_shape
+    # Image preprocessing (sharpen + contrast on luminance, hue-preserving).
+    # Applied BEFORE solving so the solver sees crisper edges.
+    if sharpen > 0 or abs(contrast - 1.0) > 1e-6:
+        from litho_color import preprocess_image
+        rgb_image = preprocess_image(rgb_image, sharpen=sharpen, contrast=contrast)
     gx, gy = thickness_grid_shape(rgb_image.shape[0], rgb_image.shape[1], params)
     small = _resample_rgb(rgb_image, (gy, gx))
 

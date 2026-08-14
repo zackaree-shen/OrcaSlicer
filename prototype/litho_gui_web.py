@@ -219,7 +219,9 @@ class LithoApi:
                 pitch_cmy=pitch_cmy, pitch_top=pitch_top,
                 dW=float(params.get("dwhite", 0.8)),
                 top_max=float(params.get("maxthick", 2.0)) - float(params.get("dwhite", 0.8)),
-                carve=params.get("carve", "concave"))
+                carve=params.get("carve", "concave"),
+                sharpen=float(params.get("sharpen", 0.5)),
+                contrast=float(params.get("contrast", 1.3)))
             elapsed = time.time() - t0
 
             self.last_meshes = meshes
