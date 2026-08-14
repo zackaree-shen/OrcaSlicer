@@ -614,28 +614,30 @@ def build_gamut_stacked(layers_max=8, layer_h=0.08, top_max=TOP_BAND_MAX, top_st
 
 
 def preprocess_image(rgb, sharpen=0.5, contrast=1.3):
-    """Sharpen + contrast-enhance the LUMINANCE channel (preserves hue).
+    """Denoise (clean) + edge-aware sharpen (sharp) + contrast on LUMINANCE.
 
-    Applied BEFORE solving so the solver sees crisper edges -> dTop relief
-    has finer detail. Unsharp mask on Y, then contrast stretch, then
-    re-apply ratio to RGB (hue-preserving). Default sharpen=0.5, contrast=1.3
-    are mild — enough to recover edge definition without halos.
+    Pipeline: median+gaussian denoise -> edge-weighted unsharp mask ->
+    contrast stretch. Hue-preserving. Applied BEFORE solving so the solver
+    sees crisp, clean edges -> dTop relief has finer, noise-free detail.
     """
     if sharpen <= 0 and abs(contrast - 1.0) < 1e-6:
         return rgb
+    from scipy.ndimage import gaussian_filter, median_filter, sobel
     rgb_f = rgb.astype(np.float64)
     Y = 0.299 * rgb_f[..., 0] + 0.587 * rgb_f[..., 1] + 0.114 * rgb_f[..., 2]
-    # Unsharp mask (sharpen edges).
+    # 1. Denoise: median (salt-pepper) + light gaussian (high-freq noise).
+    Y = 0.5 * Y + 0.25 * median_filter(Y, size=3) + 0.25 * gaussian_filter(Y, sigma=0.5)
+    # 2. Edge-aware sharpen: strong at edges (preserve contours), weak in flats.
     if sharpen > 0:
-        from scipy.ndimage import gaussian_filter
         Y_blur = gaussian_filter(Y, sigma=1.0)
-        Y = Y + sharpen * (Y - Y_blur)
-    # Contrast stretch.
+        gx = np.abs(sobel(Y)); gy = np.abs(sobel(Y))
+        edge_w = np.clip(np.hypot(gx, gy) / (np.percentile(np.hypot(gx, gy), 90) + 1e-6), 0, 1)
+        Y = Y + sharpen * (Y - Y_blur) * (0.3 + 0.7 * edge_w)
+    # 3. Contrast stretch.
     if abs(contrast - 1.0) > 1e-6:
         Y_mean = Y.mean()
         Y = Y_mean + contrast * (Y - Y_mean)
     Y = np.clip(Y, 0, 255)
-    # Hue-preserving ratio back to RGB.
     ratio = np.clip(Y / (0.299 * rgb_f[..., 0] + 0.587 * rgb_f[..., 1] +
                          0.114 * rgb_f[..., 2] + 1e-6), 0, 3)
     return np.clip(rgb_f * ratio[..., None], 0, 255).astype(np.uint8)
@@ -753,7 +755,7 @@ def solve_stacked(target_srgb, gamut, chunk=4096, k=32, exact=False,
 
 
 def _smooth_top_resolve(dTop, dC, dM, dY, dE, idx, flat_lab, gamut,
-                        top_tol=0.08, k=64, smooth_sigma=1.5):
+                        top_tol=0.08, k=64, smooth_sigma=1.0):
     """EXPERIMENTAL post-solve spatial-consistency pass (white-relief anti-spike).
 
     NOTE (iteration 26): this approach is superseded by default-off. Gaussian
@@ -802,9 +804,9 @@ def _smooth_top_resolve(dTop, dC, dM, dY, dE, idx, flat_lab, gamut,
     tol_map = np.clip(0.1 + (chroma - 5.0) / 15.0 * (top_tol - 0.1), 0.1, top_tol)
     # Blend weight also rises faster in low-chroma (neutral) regions.
     w_deg = np.clip((span - tol_map) / (6 * tol_map), 0.0, 1.0)
-    # Extra smoothing weight for neutral pixels (where spikes come from).
-    neutral_boost = np.clip(1.0 - chroma / 10.0, 0.0, 1.0)[:, None]  # placeholder
-    w_deg = np.maximum(w_deg, neutral_boost.reshape(h, w) * 0.8)
+    # No neutral_boost: only degeneracy-weighted smoothing. Edges (low
+    # degeneracy, forced NN) keep full detail; flat degenerate regions
+    # (high span, NN flip-flop) get smoothed.
 
     dTop_s = (1.0 - w_deg) * dTop + w_deg * gaussian_filter(dTop, sigma=smooth_sigma)
     # Re-solve (dC,dM,dY) with dTop in [dTop_s-tol, dTop_s+tol] (per-pixel tol).
