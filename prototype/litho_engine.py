@@ -46,6 +46,12 @@ from litho_color import (
     LAYER_GAP,
 )
 
+# BAMBU reference geometry: thin white bottom slab (z_lo, measured from
+# lithophane_谢bro_U1). Single source of truth for the gamut build AND the
+# forward-model dE recompute (iteration 46 review m4: was hardcoded in
+# three places that could drift apart).
+BAMBU_WHITE_BASE = 0.2
+
 
 class LithoMode(enum.Enum):
     """Geometry strategy for how the C/M/Y color layers are placed in Z."""
@@ -219,7 +225,7 @@ def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.
                             dW=WHITE_THICKNESS, top_max=TOP_BAND_MAX, exact=False,
                             pitch_cmy=0.8, pitch_top=0.10, smooth_top=True,
                             carve="concave", sharpen=2.0, contrast=1.5,
-                            tone_map=True):
+                            tone_map=True, sat_boost=1.0):
     """Generate lithophane meshes under a given mode and color order.
 
     sharpen/contrast: image preprocessing applied to the luminance channel
@@ -283,7 +289,7 @@ def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.
         # "base" seen by the Beer-Lambert model is z_lo (thin bottom slab),
         # NOT z_lo + band (that volume is the C/M/Y band, not white).
         # (that volume is the C/M/Y band, not white).
-        z_lo = 0.2
+        z_lo = BAMBU_WHITE_BASE
         band = 0.7
         gamut = build_gamut_stacked(
             layers_max=max(1, int(round(band / layer_h))), layer_h=layer_h,
@@ -291,34 +297,45 @@ def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.
     else:
         gamut = build_gamut_stacked(layers_max=layers_max, layer_h=layer_h,
                                     top_max=top_max, dW=dW, td=td)
-    # P1 path (BAMBU + tone_map) replaces _smooth_top_resolve entirely:
-    # dTop is the anchored monotone FIELD (computed from the same preprocessed
-    # image the CMY solve sees — adversarial review M2: v1 tone-mapped BEFORE
-    # sharpen/contrast, twisting its own anchors), then spike surgery cleans
-    # residual outlier gradients. Solve runs raw (smooth_top=False).
-    dTop, dC, dM, dY, dE, idx = solve_stacked(small, gamut, exact=exact,
-                                              smooth_top=smooth_top and not _p1)
-
+    # P1 path (BAMBU + tone_map): dTop is the anchored monotone FIELD, fully
+    # finalized BEFORE the CMY re-solve so the |card_dTop - dTop| <= 0.10
+    # band contract holds against the FINAL geometry (iteration 46 review
+    # M5: the old order ran surgery AFTER resolve, moving dTop by O(0.5mm)
+    # >> 0.10 tolerance). The full NN solve_stacked is SKIPPED here — its
+    # six outputs were unconditionally overwritten (dead compute, review
+    # m3) and resolve_cmy_for_dtop only needs the gamut + target Lab.
     if _p1:
-        from litho_color import (anchored_dtop_field, resolve_cmy_for_dtop,
-                                 spike_surgery, forward_stacked,
-                                 xyz_to_lab, linear_to_xyz, srgb8_to_linear,
-                                 _dE2000_pair)
-        # (a) monotone anchored dTop from the SAME image the solver saw.
-        dTop = anchored_dtop_field(small, td_w=td["W"][0], top_max=top_max)
-        # (b) re-solve C/M/Y with dTop pinned (kills the CMY-lattice sawtooth
-        # where solver-chosen dTop snapped back to top_max across cells).
+        from litho_color import (anchored_dtop_field, desalt_isolated_spikes,
+                                 resolve_cmy_for_dtop, spike_surgery,
+                                 forward_stacked, xyz_to_lab, linear_to_xyz,
+                                 srgb8_to_linear, _dE2000_pair)
+        # (a) monotone anchored dTop from the SAME image the CMY solve sees.
+        #     smooth_sigma=0.8 merges sub-printable-scale noise before the
+        #     rank equalizer can spread it to full amplitude (review B1).
+        dTop = anchored_dtop_field(small, td_w=td["W"][0], top_max=top_max,
+                                   smooth_sigma=0.8)
+        # (b) finalize geometry: targeted salt removal (isolated >1.5-layer
+        #     jumps only — real edges are erosion-stable), then spike
+        #     surgery (iteration 44 config).
+        dTop = desalt_isolated_spikes(dTop, thr=0.3, rounds=2)
+        dTop = spike_surgery(dTop, t_sigma=1.5, iterations=2, top_max=top_max)
+        # (c) re-solve C/M/Y against the FINAL dTop (band contract intact).
         flat_lab = xyz_to_lab(linear_to_xyz(
             srgb8_to_linear(small).reshape(-1, 3))).reshape(-1, 3)
+        if abs(sat_boost - 1.0) > 1e-6:
+            # Saturation boost on the CMY TARGET only (Lab chroma scaling —
+            # L* untouched, so the dTop field above is NOT disturbed; doing
+            # this in RGB preprocess would silently re-rank the field via
+            # the (R+G+B)/3 luminance, review B4 leak). Declared cost at
+            # boost=1.3 (measured): honest dE median +24%, frac(dE>6)
+            # +14pp — user-opted trade for perceived saturation (gamut has
+            # headroom: reached S median 0.31 -> 0.51 vs card max 0.70).
+            flat_lab[:, 1:] = 50.0 + (flat_lab[:, 1:] - 50.0) * sat_boost
         dC, dM, dY, dE, idx = resolve_cmy_for_dtop(flat_lab, gamut, dTop)
-        # (c) one-shot spike surgery on the continuous field (iteration 44
-        # config: t=1.5, it=2 — no double smoothing).
-        dTop = spike_surgery(dTop, t_sigma=1.5, iterations=2, top_max=top_max)
-        # (d) HONEST dE: forward-model the ACTUAL printed geometry (surgery
-        # may shift dTop within the band) against the ORIGINAL image, not the
-        # preprocessed target (adversarial review B3).
-        _fwd_dW = 0.2  # BAMBU gamut white base (z_lo)
-        _tau = forward_stacked(dTop, dC, dM, dY, td=td, dW=_fwd_dW).reshape(-1, 3)
+        # (d) HONEST dE: forward-model the ACTUAL printed geometry against
+        # the ORIGINAL image (adversarial review B3), median + p90 reported.
+        _tau = forward_stacked(dTop, dC, dM, dY, td=td,
+                               dW=BAMBU_WHITE_BASE).reshape(-1, 3)
         _lab_p = xyz_to_lab(linear_to_xyz(
             np.clip(_tau, 0, 1))).reshape(-1, 3)
         _orig_small = _resample_rgb(_p1_orig, small.shape[:2])
@@ -326,8 +343,15 @@ def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.
             srgb8_to_linear(_orig_small))).reshape(-1, 3)
         _sub = np.linspace(0, _lab_t.shape[0] - 1,
                            min(20000, _lab_t.shape[0])).astype(int)
-        _med = float(np.median(_dE2000_pair(_lab_t[_sub], _lab_p[_sub])))
+        _dE_all = _dE2000_pair(_lab_t[_sub], _lab_p[_sub])
+        _med = float(np.median(_dE_all))
+        print(f"[P1] dE vs ORIGINAL image: median={_med:.2f} "
+              f"p90={np.percentile(_dE_all, 90):.2f} "
+              f"(sat_boost={sat_boost:.2f})")
         dE = np.full_like(dTop, _med)
+    else:
+        dTop, dC, dM, dY, dE, idx = solve_stacked(small, gamut, exact=exact,
+                                                  smooth_top=smooth_top)
 
     thickness = {"C": dC, "M": dM, "Y": dY, "top": dTop, "W": np.full_like(dTop, dW)}
 
@@ -461,7 +485,7 @@ def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.
         #     coarse CMY fill top (a height-field top IS the bilinear surface),
         #     so the plate never dips into the color band (which would let the
         #     slicer's part-order clipping hollow out W) and never floats.
-        z_lo = 0.2
+        z_lo = BAMBU_WHITE_BASE
         band = 0.7
         MIN_FLOOR = 1e-3
         from litho_core import heightfield_band_mesh

@@ -37,6 +37,7 @@ function readParams() {
     sharpen: parseFloat($('sharpen').value) || 2.0,
     contrast: parseFloat($('contrast').value) || 1.5,
     tonemap: parseInt($('tonemap') ? $('tonemap').value : 1),
+    satboost: parseFloat($('satboost') ? $('satboost').value : 1.0) || 1.0,
   };
 }
 
@@ -58,6 +59,8 @@ window.onModeChange = async () => {
   // BAMBU exposes the adaptive thickness (anchored dTop field) toggle.
   const tmGroup = $('tonemap-group');
   if (tmGroup) tmGroup.style.display = (mode === 'bambu') ? '' : 'none';
+  const sbGroup = $('satboost-group');
+  if (sbGroup) sbGroup.style.display = (mode === 'bambu') ? '' : 'none';
   // Auto rebuild if image loaded.
   if (window.hasImage) window.build();
 };

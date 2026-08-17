@@ -200,18 +200,24 @@ def test_anchored_dtop_field():
            len(np.unique(np.round(d / 0.2).astype(int))) >= 8,
            f"layers={len(np.unique(np.round(d / 0.2).astype(int)))}")
 
-    # Monotone: sorting pixels by brightness, dTop must be non-increasing.
-    lin = srgb8_to_linear(rgb).mean(-1)
-    order = np.argsort(lin.ravel())
+    # Monotone in the BLURRED luminance (iteration 46: smooth_sigma makes
+    # dTop a function of the local neighborhood, not the raw pixel — the
+    # blur is what merges noise before ranking; monotonicity vs raw L no
+    # longer holds by design).
+    from scipy.ndimage import gaussian_filter
+    lin_b = gaussian_filter(srgb8_to_linear(rgb).mean(-1), 0.8)
+    order = np.argsort(lin_b.ravel())
     dv = d.ravel()[order]
-    report("anchored: monotone (brighter -> thinner)",
+    report("anchored: monotone in blurred luminance (brighter -> thinner)",
            bool(np.all(np.diff(dv) <= 1e-9)), f"max_up={np.diff(dv).max():.2e}")
 
     # Plateau: constant background maps to a single dTop value (mid-rank).
+    # Check the interior AWAY from the bright strip: the blur's reach is
+    # ~3px, rows near the strip legitimately differ.
     plat = np.full((32, 32, 3), 90, np.uint8)
     plat[:4] = 200                                                # bright strip
     dp = anchored_dtop_field(plat, td_w=5.4, top_max=TOP)
-    bg = dp[4:]
+    bg = dp[10:]
     report("anchored: plateau maps to ONE value (no gradient artifact)",
            float(bg.max() - bg.min()) < 1e-12,
            f"spread={bg.max() - bg.min():.2e}")
@@ -260,6 +266,70 @@ def test_resolve_cmy_for_dtop():
            f"med_dE={np.median(dE):.2f}")
 
 
+def test_desalt_and_smooth_sigma():
+    """Iteration 46: rank equalizer spreads residual noise to full amplitude
+    (adversarial B1: +-1 gray level -> dTop std ~0.55 on flat+noise). The
+    pre-rank blur (smooth_sigma) + targeted salt removal must cut isolated
+    print-perceptible spikes WITHOUT touching real edges.
+    """
+    from scipy.ndimage import binary_erosion, generate_binary_structure
+    from litho_color import anchored_dtop_field, desalt_isolated_spikes, \
+        spike_surgery
+
+    def iso_pct(f, thr=0.3):
+        g = np.zeros(f.shape, bool)
+        gx = np.abs(np.diff(f, axis=1))
+        gy = np.abs(np.diff(f, axis=0))
+        g[:-1, :-1] = np.maximum(gx[:-1, :], gy[:, :-1]) > thr
+        st = generate_binary_structure(2, 2)
+        return float((g & ~binary_erosion(g, structure=st,
+                                          border_value=0)).mean() * 100)
+
+    # Textured scene close to the real cartoon statistics: dark mass with
+    # incoherent texture + bright mass (no exact plateaus).
+    rng = np.random.default_rng(7)
+    dark = rng.integers(20, 120, (64, 64))
+    bright = rng.integers(170, 255, (16, 64))
+    img = np.stack([np.concatenate([dark, bright], 0)] * 3, -1).astype(np.uint8)
+
+    f_raw = anchored_dtop_field(img, td_w=5.4, top_max=2.0, smooth_sigma=0.0)
+    f_new = anchored_dtop_field(img, td_w=5.4, top_max=2.0, smooth_sigma=0.8)
+    f_new = desalt_isolated_spikes(f_new, thr=0.3, rounds=2)
+    f_new = spike_surgery(f_new, t_sigma=1.5, iterations=2, top_max=2.0)
+    raw_pct, new_pct = iso_pct(f_raw), iso_pct(f_new)
+    # Measured on the real cartoon: 11.0% -> 7.5%; synthetic is harsher
+    # (fully incoherent texture). Assert a clear reduction, not a magic no.
+    report("desalt+blur: isolated spikes clearly reduced",
+           new_pct < raw_pct * 0.75, f"{raw_pct:.1f}% -> {new_pct:.1f}%")
+
+    # Real edges survive: a dark/bright step must keep a >0.5mm jump across
+    # the (blur-widened) transition after the full finalize chain.
+    step = np.full((32, 32, 3), 60, np.uint8)
+    step[:, 16:, :] = 200
+    f_step = anchored_dtop_field(step, td_w=5.4, top_max=2.0, smooth_sigma=0.8)
+    f_step = desalt_isolated_spikes(f_step)
+    f_step = spike_surgery(f_step, t_sigma=1.5, iterations=2, top_max=2.0)
+    row = f_step[16]
+    jump = float(np.max(row[:14]) - np.min(row[18:]))
+    report("desalt+blur: real edge jump preserved (>0.5mm)",
+           jump > 0.5, f"jump={jump:.2f}mm")
+
+    # Plateau guard still holds under the blur: the plateau INTERIOR (away
+    # from the bright strip's blur reach) stays a single value.
+    plat = np.full((32, 32, 3), 90, np.uint8)
+    plat[:4] = 200
+    dp = anchored_dtop_field(plat, td_w=5.4, top_max=2.0, smooth_sigma=0.8)
+    interior = dp[10:]
+    report("anchored: plateau interior still ONE value under blur",
+           float(interior.max() - interior.min()) < 1e-12,
+           f"spread={interior.max() - interior.min():.2e}")
+
+    # Known limitation (documented, NOT asserted as pass): pure flat+noise
+    # input has no structure to keep — the rank field is uniform noise and
+    # the blur only decorrelates it (B1 reproduction measured std ~0.55 ->
+    # ~0.44). No false assertion here.
+
+
 if __name__ == "__main__":
     test_color_space()
     gamut = test_gamut_and_solver()
@@ -267,6 +337,7 @@ if __name__ == "__main__":
     test_smooth_top_antispike()
     test_anchored_dtop_field()
     test_resolve_cmy_for_dtop()
+    test_desalt_and_smooth_sigma()
     print()
     print(f"{sum(RESULTS)}/{len(RESULTS)} passed")
     sys.exit(0 if all(RESULTS) else 1)
