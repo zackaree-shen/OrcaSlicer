@@ -170,11 +170,103 @@ def test_smooth_top_antispike():
             report(f"smooth_top={sm}: raw NN flip-flops (max step > 0.3)",
                    g_raw > 0.3, f"max_step={g_raw:.3f}")
 
+
+def test_anchored_dtop_field():
+    """Iteration 45 v2: OD-domain CDF-equalized dTop field.
+
+    Regression guards for the adversarial findings:
+      B1/B2: v1 absolute-inversion clip crushed 84.4% of a dark cartoon to
+             dTop == top_max (flat plateaus) -> saturation must stay < 5%.
+      B4:    pure-black pixels (log10(0) = -inf) and narrow-dynamic images
+             (0/0 NaN) must be guarded.
+      ties:  a constant plateau must map to ONE dTop value (mid-rank), not a
+             linear gradient inside the plateau.
+      monotonicity: darker pixel -> thicker white (field is monotone in L).
+    """
+    from litho_color import anchored_dtop_field
+    TOP = 2.0
+
+    # Dark cartoon stand-in: 80% of pixels below the white window (L<0.391
+    # linear ~ sRGB<168), mimicking the measured 保险柜 image statistics.
+    rng = np.random.default_rng(7)
+    dark_bg = rng.integers(20, 120, (64, 64))                     # dark mass
+    bright = rng.integers(170, 255, (16, 64))                     # 20% bright
+    img = np.concatenate([np.concatenate([dark_bg, bright], 0)], -1)
+    rgb = np.stack([img] * 3, axis=-1).astype(np.uint8)
+    d = anchored_dtop_field(rgb, td_w=5.4, top_max=TOP)
+    sat = (d >= TOP - 0.01).mean()
+    report("anchored: dark-image saturation < 5%", sat < 0.05, f"sat={sat:.3f}")
+    report("anchored: layer spread (>=8 of 11 layers used)",
+           len(np.unique(np.round(d / 0.2).astype(int))) >= 8,
+           f"layers={len(np.unique(np.round(d / 0.2).astype(int)))}")
+
+    # Monotone: sorting pixels by brightness, dTop must be non-increasing.
+    lin = srgb8_to_linear(rgb).mean(-1)
+    order = np.argsort(lin.ravel())
+    dv = d.ravel()[order]
+    report("anchored: monotone (brighter -> thinner)",
+           bool(np.all(np.diff(dv) <= 1e-9)), f"max_up={np.diff(dv).max():.2e}")
+
+    # Plateau: constant background maps to a single dTop value (mid-rank).
+    plat = np.full((32, 32, 3), 90, np.uint8)
+    plat[:4] = 200                                                # bright strip
+    dp = anchored_dtop_field(plat, td_w=5.4, top_max=TOP)
+    bg = dp[4:]
+    report("anchored: plateau maps to ONE value (no gradient artifact)",
+           float(bg.max() - bg.min()) < 1e-12,
+           f"spread={bg.max() - bg.min():.2e}")
+
+    # Guards: pure-color image -> constant mid field, no NaN.
+    solid = np.full((8, 8, 3), 128, np.uint8)
+    ds = anchored_dtop_field(solid, td_w=5.4, top_max=TOP)
+    report("anchored: narrow-dynamic guard (constant, finite)",
+           bool(np.all(np.isfinite(ds)) and ds.std() < 1e-12),
+           f"std={ds.std():.2e}")
+
+    # Pure black pixels must not produce -inf/NaN.
+    blk = np.zeros((8, 8, 3), np.uint8)
+    blk[0, 0] = 255
+    db = anchored_dtop_field(blk, td_w=5.4, top_max=TOP)
+    report("anchored: pure-black guard (finite)",
+           bool(np.all(np.isfinite(db))), "")
+
+
+def test_resolve_cmy_for_dtop():
+    """Iteration 45 v2: CMY re-solve respects the pinned dTop band.
+
+    M1: solver-chosen dTop sawtoothed across CMY lattice cells; the pinned
+    re-solve must return card entries within |dTop - target| <= tol (or the
+    band-nearest entry when the band is empty).
+    """
+    from litho_color import (build_gamut_stacked, resolve_cmy_for_dtop,
+                             srgb8_to_lab)
+    gamut = build_gamut_stacked(layers_max=3, layer_h=0.2, top_max=2.0,
+                                dW=0.2, td=DEFAULT_TD)
+    ramp = np.stack([np.linspace(255, 0, 128, dtype=np.uint8)] * 3, -1)[None]
+    lab = srgb8_to_lab(ramp).reshape(-1, 3)
+    target = np.linspace(0, 2.0, 128).reshape(1, 128)             # pinned ramp
+    dC, dM, dY, dE, idx = resolve_cmy_for_dtop(lab, gamut, target,
+                                               top_tol=0.10)
+    t = gamut["thickness"]
+    got = t[idx][..., 0]
+    dev = np.abs(got - target)
+    # Non-band picks are allowed only as band-nearest fallbacks; their dTop
+    # deviation must stay within tol + half of the card top_step (0.08).
+    report("resolve_cmy: |dTop_card - target| <= tol+half-step",
+           float(dev.max()) <= 0.10 + 0.05,
+           f"max_dev={dev.max():.3f}")
+    report("resolve_cmy: dE finite and mostly small",
+           bool(np.all(np.isfinite(dE)) and np.median(dE) < 15.0),
+           f"med_dE={np.median(dE):.2f}")
+
+
 if __name__ == "__main__":
     test_color_space()
     gamut = test_gamut_and_solver()
     test_end_to_end(gamut)
     test_smooth_top_antispike()
+    test_anchored_dtop_field()
+    test_resolve_cmy_for_dtop()
     print()
     print(f"{sum(RESULTS)}/{len(RESULTS)} passed")
     sys.exit(0 if all(RESULTS) else 1)

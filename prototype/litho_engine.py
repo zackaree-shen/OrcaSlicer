@@ -245,14 +245,17 @@ def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.
             f"got mode={mode.value}. For LAYERED use one of the 6 CMY orders.")
 
     from litho_core import thickness_grid_shape
-    # P1a: Beer-Lambert tone mapping BEFORE solving (iteration 41 research:
-    # linear luminance->thickness crushes shadows; invert the physics).
-    # Use the SAME dW the gamut will use (BAMBU gamut builds with z_lo=0.2).
-    if tone_map and mode == LithoMode.BAMBU:
-        from litho_color import tone_mapping_preprocess
-        _tm_dW = 0.2 if mode == LithoMode.BAMBU else dW
-        rgb_image = tone_mapping_preprocess(rgb_image, td_w=td["W"][0], d_w=_tm_dW,
-                                            top_max=top_max)
+    # P1a-v2 (iteration 45): dTop is a DIRECT monotone field anchored to the
+    # image's own dynamic range (anchored_dtop_field) — NOT the v1
+    # "re-tone-the-RGB" route (tone_mapping_preprocess), which absolute
+    # Beer-Lambert inversion + window clip crushed 84.4% of a dark cartoon to
+    # dTop == top_max (giant flat plateaus). Keep an unprocessed resample of
+    # the ORIGINAL image for honest dE reporting (adversarial review B3: the
+    # old dE was computed against the tone-mapped image — a self-flattering
+    # metric).
+    _p1 = tone_map and mode == LithoMode.BAMBU
+    if _p1:
+        _p1_orig = rgb_image.copy()
     # Image preprocessing (sharpen + contrast on luminance, hue-preserving).
     # Applied BEFORE solving so the solver sees crisper edges.
     if sharpen > 0 or abs(contrast - 1.0) > 1e-6:
@@ -288,33 +291,41 @@ def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.
     else:
         gamut = build_gamut_stacked(layers_max=layers_max, layer_h=layer_h,
                                     top_max=top_max, dW=dW, td=td)
-    # P1 path (BAMBU + tone_map) replaces _smooth_top_resolve entirely with
-    # spike surgery: running BOTH was double smoothing (measured -38% detail
-    # gradient vs the standalone-validated config). Solve raw, then denoise
-    # once with surgery (t=1.5, it=2: p95=0.240, max detail retention).
-    _p1 = tone_map and mode == LithoMode.BAMBU
+    # P1 path (BAMBU + tone_map) replaces _smooth_top_resolve entirely:
+    # dTop is the anchored monotone FIELD (computed from the same preprocessed
+    # image the CMY solve sees — adversarial review M2: v1 tone-mapped BEFORE
+    # sharpen/contrast, twisting its own anchors), then spike surgery cleans
+    # residual outlier gradients. Solve runs raw (smooth_top=False).
     dTop, dC, dM, dY, dE, idx = solve_stacked(small, gamut, exact=exact,
                                               smooth_top=smooth_top and not _p1)
 
-    # P1b: spike surgery on dTop AFTER the solver pipeline. The result is a
-    # CONTINUOUS field — geometry uses it directly (discrete card entries
-    # only ever supplied CMY). dE is recomputed from the forward model so
-    # the reported accuracy reflects the actual printed geometry.
     if _p1:
-        from litho_color import spike_surgery, forward_stacked, \
-            xyz_to_lab, linear_to_xyz, srgb8_to_linear, linear_to_srgb8, \
-            ciede2000_matrix
+        from litho_color import (anchored_dtop_field, resolve_cmy_for_dtop,
+                                 spike_surgery, forward_stacked,
+                                 xyz_to_lab, linear_to_xyz, srgb8_to_linear,
+                                 _dE2000_pair)
+        # (a) monotone anchored dTop from the SAME image the solver saw.
+        dTop = anchored_dtop_field(small, td_w=td["W"][0], top_max=top_max)
+        # (b) re-solve C/M/Y with dTop pinned (kills the CMY-lattice sawtooth
+        # where solver-chosen dTop snapped back to top_max across cells).
+        flat_lab = xyz_to_lab(linear_to_xyz(
+            srgb8_to_linear(small).reshape(-1, 3))).reshape(-1, 3)
+        dC, dM, dY, dE, idx = resolve_cmy_for_dtop(flat_lab, gamut, dTop)
+        # (c) one-shot spike surgery on the continuous field (iteration 44
+        # config: t=1.5, it=2 — no double smoothing).
         dTop = spike_surgery(dTop, t_sigma=1.5, iterations=2, top_max=top_max)
-        # Recompute dE (subsampled) for the actual thickness + solver CMY.
-        # Use the same dW the gamut used (BAMBU: z_lo=0.2).
-        _fwd_dW = 0.2 if mode == LithoMode.BAMBU else dW
+        # (d) HONEST dE: forward-model the ACTUAL printed geometry (surgery
+        # may shift dTop within the band) against the ORIGINAL image, not the
+        # preprocessed target (adversarial review B3).
+        _fwd_dW = 0.2  # BAMBU gamut white base (z_lo)
         _tau = forward_stacked(dTop, dC, dM, dY, td=td, dW=_fwd_dW).reshape(-1, 3)
-        _rgb_p = linear_to_srgb8(np.clip(_tau, 0, 1)).reshape(-1, 3)
-        _lab_t = xyz_to_lab(linear_to_xyz(srgb8_to_linear(small))).reshape(-1, 3)
-        _lab_p = xyz_to_lab(linear_to_xyz(srgb8_to_linear(
-            _rgb_p.reshape(-1, 1, 3).astype(np.uint8)))).reshape(-1, 3)
-        _sub = np.linspace(0, _lab_t.shape[0] - 1, min(20000, _lab_t.shape[0])).astype(int)
-        from litho_color import _dE2000_pair
+        _lab_p = xyz_to_lab(linear_to_xyz(
+            np.clip(_tau, 0, 1))).reshape(-1, 3)
+        _orig_small = _resample_rgb(_p1_orig, small.shape[:2])
+        _lab_t = xyz_to_lab(linear_to_xyz(
+            srgb8_to_linear(_orig_small))).reshape(-1, 3)
+        _sub = np.linspace(0, _lab_t.shape[0] - 1,
+                           min(20000, _lab_t.shape[0])).astype(int)
         _med = float(np.median(_dE2000_pair(_lab_t[_sub], _lab_p[_sub])))
         dE = np.full_like(dTop, _med)
 

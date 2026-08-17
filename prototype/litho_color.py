@@ -681,6 +681,108 @@ def spike_surgery(dT, t_sigma=1.5, iterations=5, top_max=1.5):
     return np.clip(h, 0, top_max)
 
 
+def anchored_dtop_field(rgb, td_w=5.4, top_max=2.0, p_low=0.5, p_high=99.5):
+    """P1a-v2: monotone luminance->dTop field via optical-density-domain CDF
+    equalization (iteration 45; supersedes tone_mapping_preprocess).
+
+    v1 (tone_mapping_preprocess) did ABSOLUTE Beer-Lambert inversion
+    (d = -td_w*log10(L) - d_w, clipped to [0, top_max]). Measured on a dark
+    cartoon where 79.6% of pixels sit below the white window
+    (tau < 10^(-(dW+top_max)/td_w) = 0.391): the clip crushed 84.4% of pixels
+    to dTop == top_max -> giant flat plateaus ("details lost" report), and
+    the ratio-encoded re-map could not represent the fix either (3x cap).
+
+    v2 maps the pixel's RANK in the optical-density domain (-td_w*log10(L))
+    to thickness: every printable layer (top_max/layer_h = 11 at 0.2mm)
+    carries an equal pixel count — measured layer histogram 81.4% on ONE
+    layer -> [5, 10, ..., 10, 5]% perfectly uniform; saturation 84.4%->0.5%.
+    Histogram equalization over the density domain is the standard
+    lithophane/bas-relief practice to maximize usable layers (ItsLithy-style
+    equalization; adaptive range mapping per Hufstedler 2020, image dynamic
+    range -> printable window).
+
+    Mid-rank (ties share one rank): a large constant background must map to
+    ONE dTop value — naive argsort().argsort() ranks would paint a linear
+    gradient INSIDE the plateau (adversarial self-check, iteration 45).
+
+    The -d_w offset cancels in ranking, so it is intentionally absent
+    (iteration 45 adversarial review, m1).
+
+    Guards (adversarial review B4):
+      - L clamped to [1e-4, 1] before log10 (pure-black pixels would give
+        log10(0) = -inf).
+      - narrow-dynamic images (unique-value span < 1e-3) return a constant
+        mid-height field (rank is uniform anyway; explicit guard keeps the
+        contract obvious and NaN-free).
+    """
+    lin = srgb8_to_linear(rgb if getattr(rgb, "dtype", None) == np.uint8
+                          else np.asarray(rgb, dtype=np.uint8))
+    L = np.clip(lin.mean(axis=-1), 1e-4, 1.0)
+    d_od = -td_w * np.log10(L)
+    vals, inv, counts = np.unique(d_od, return_inverse=True, return_counts=True)
+    if len(vals) < 2 or vals[-1] - vals[0] < 1e-3:
+        return np.full(L.shape, top_max / 2.0)
+    cdf = np.cumsum(counts) - 0.5 * counts          # mid-rank per unique value
+    rank = cdf[inv] / d_od.size                     # (0, 1), ties share rank
+    return rank.reshape(L.shape) * top_max
+
+
+def resolve_cmy_for_dtop(flat_lab, gamut, dTop, top_tol=0.10, k=64, chunk=8192):
+    """Re-solve (dC,dM,dY) with dTop pinned to an externally-given field.
+
+    Iteration 45 v2: dTop comes from anchored_dtop_field (monotone), NOT from
+    the NN solver. This removes the CMY-lattice sawtooth measured on a gray
+    ramp: a 0.2mm CMY step = 0.53 decades of neutral density, but dTop can
+    only compensate 0.407 decades inside one lattice cell, so solver-chosen
+    dTop snapped back to top_max across cells (non-monotone, 3 large jumps).
+
+    Band-constrained pick among the k nearest-Lab card neighbors: entries
+    with |card_dTop - dTop| <= top_tol first (lowest dE wins), band-nearest
+    fallback when empty (same guard as _smooth_top_resolve).
+    top_tol=0.10 = 1.25x card top_step 0.08 (build_gamut_stacked default);
+    continuous dTop values land at most half a step (0.04) from a card entry,
+    so 0.10 admits the two nearest entries without re-admitting degeneracy.
+
+    Returns (dC, dM, dY, dE, idx) each shaped like dTop.
+    """
+    from scipy.spatial import cKDTree
+    dTop = np.asarray(dTop, dtype=np.float64)
+    h, w = dTop.shape
+    gamut_t = gamut["thickness"]
+    gamut_lab = gamut["lab"]
+    tree = cKDTree(gamut_lab)
+    kk = min(k, len(gamut_lab))
+    n = flat_lab.shape[0]
+    dTop_f = dTop.ravel()
+    res_t = np.empty((n, 4)); res_dE = np.empty(n); res_idx = np.empty(n, dtype=np.int64)
+    for s in range(0, n, chunk):
+        e = min(s + chunk, n)
+        _, nbrs = tree.query(flat_lab[s:e], k=kk)
+        nbrs = np.atleast_2d(nbrs)
+        kk2 = nbrs.shape[1]
+        tiled = np.repeat(flat_lab[s:e], kk2, axis=0)
+        cand = gamut_lab[nbrs.reshape(-1)]
+        dist = _dE2000_pair(tiled, cand).reshape(e - s, kk2)
+        dtop_cand = gamut_t[nbrs][..., 0]
+        dtop_target = dTop_f[s:e, None]
+        in_band = np.abs(dtop_cand - dtop_target) <= top_tol
+        n_in = in_band.sum(axis=1)
+        dist_band = np.where(in_band, dist, 1e9)
+        empty = n_in == 0
+        if empty.any():
+            dtop_dist = np.abs(dtop_cand - dtop_target)
+            fb = np.argmin(dtop_dist, axis=1)
+            for r in np.where(empty)[0]:
+                dist_band[r, fb[r]] = dist[r, fb[r]]
+        best = np.argmin(dist_band, axis=1)
+        rows = np.arange(e - s)
+        res_t[s:e] = gamut_t[nbrs[rows, best]]
+        res_dE[s:e] = dist_band[rows, best]
+        res_idx[s:e] = nbrs[rows, best]
+    return (res_t[:, 1].reshape(h, w), res_t[:, 2].reshape(h, w),
+            res_t[:, 3].reshape(h, w), res_dE.reshape(h, w), res_idx.reshape(h, w))
+
+
 def solve_stacked(target_srgb, gamut, chunk=4096, k=32, exact=False,
                   smooth_top=False, top_tol=0.5):
     """Inverse problem over the 5-layer stack.

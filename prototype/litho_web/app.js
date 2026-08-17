@@ -28,7 +28,6 @@ function readParams() {
     layer_h: parseFloat($('layerh').value) || 0.2,
     layers: parseInt($('layers').value) || 8,
     pitch: parseFloat($('pitch').value) || 0.3,
-    dwhite: parseFloat($('dwhite').value) || 0.3,
     td_c: parseFloat($('tdc').value) || 0.5,
     td_m: parseFloat($('tdm').value) || 0.5,
     td_y: parseFloat($('tdy').value) || 0.5,
@@ -37,6 +36,7 @@ function readParams() {
     carve: $('carve').value,
     sharpen: parseFloat($('sharpen').value) || 2.0,
     contrast: parseFloat($('contrast').value) || 1.5,
+    tonemap: parseInt($('tonemap') ? $('tonemap').value : 1),
   };
 }
 
@@ -55,6 +55,9 @@ window.onModeChange = async () => {
     order.disabled = true;
     order.value = 'CMY';
   }
+  // BAMBU exposes the adaptive thickness (anchored dTop field) toggle.
+  const tmGroup = $('tonemap-group');
+  if (tmGroup) tmGroup.style.display = (mode === 'bambu') ? '' : 'none';
   // Auto rebuild if image loaded.
   if (window.hasImage) window.build();
 };
