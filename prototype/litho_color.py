@@ -681,7 +681,7 @@ def spike_surgery(dT, t_sigma=1.5, iterations=5, top_max=1.5):
     return np.clip(h, 0, top_max)
 
 
-def anchored_dtop_field(rgb, td_w=5.4, top_max=2.0, smooth_sigma=0.8):
+def anchored_dtop_field(rgb, td_w=5.4, top_max=2.0, p_low=0.5, p_high=99.5):
     """P1a-v2: monotone luminance->dTop field via optical-density-domain CDF
     equalization (iteration 45; supersedes tone_mapping_preprocess).
 
@@ -705,19 +705,6 @@ def anchored_dtop_field(rgb, td_w=5.4, top_max=2.0, smooth_sigma=0.8):
     ONE dTop value — naive argsort().argsort() ranks would paint a linear
     gradient INSIDE the plateau (adversarial self-check, iteration 45).
 
-    KNOWN AMPLIFIER (iteration 46 adversarial review, B1): rank equalization
-    spreads ANY residual non-tied noise to the full window (+-1 gray level
-    of sensor/JPEG noise -> dTop std ~0.55 on a flat field, ~1000x gain) —
-    the equalizer cannot tell noise from texture, both become ranks. On a
-    pure-noise flat field the rank field IS uniform noise and no spatial
-    filter can recover structure that is not there (known limitation).
-    Mitigation on real images: smooth_sigma pre-blur in L space merges
-    sub-printable-scale noise clusters before ranking. sigma=0.8 px on the
-    solve grid (pitch 0.3mm) = 0.24mm spatial scale, below the 0.44mm CMY
-    print pitch, so printable detail survives (measured on the dark cartoon:
-    isolated print-perceptible spikes 11.0% -> 7.5%, structure NCC -0.916
-    -> -0.932 i.e. BETTER fidelity — salt noise was itself the deviation).
-
     The -d_w offset cancels in ranking, so it is intentionally absent
     (iteration 45 adversarial review, m1).
 
@@ -728,12 +715,9 @@ def anchored_dtop_field(rgb, td_w=5.4, top_max=2.0, smooth_sigma=0.8):
         mid-height field (rank is uniform anyway; explicit guard keeps the
         contract obvious and NaN-free).
     """
-    from scipy.ndimage import gaussian_filter
     lin = srgb8_to_linear(rgb if getattr(rgb, "dtype", None) == np.uint8
                           else np.asarray(rgb, dtype=np.uint8))
     L = np.clip(lin.mean(axis=-1), 1e-4, 1.0)
-    if smooth_sigma and smooth_sigma > 0:
-        L = gaussian_filter(L, smooth_sigma)
     d_od = -td_w * np.log10(L)
     vals, inv, counts = np.unique(d_od, return_inverse=True, return_counts=True)
     if len(vals) < 2 or vals[-1] - vals[0] < 1e-3:
@@ -741,37 +725,6 @@ def anchored_dtop_field(rgb, td_w=5.4, top_max=2.0, smooth_sigma=0.8):
     cdf = np.cumsum(counts) - 0.5 * counts          # mid-rank per unique value
     rank = cdf[inv] / d_od.size                     # (0, 1), ties share rank
     return rank.reshape(L.shape) * top_max
-
-
-def desalt_isolated_spikes(dTop, thr=0.3, rounds=2):
-    """Targeted removal of ISOLATED print-perceptible spikes (iteration 46).
-
-    The rank equalizer turns residual noise into salt: on the dark cartoon,
-    25.2% of pixels had a >0.3mm single-step jump, of which 96% were
-    ISOLATED (single-pixel, 3x3 neighborhood has no other jump) and only
-    ~1% were continuous edges worth keeping. Global smoothing to kill them
-    would also kill the edges (iteration 26 lesson: no post-hoc smoothing
-    removes spikes without removing detail). This pass replaces ONLY the
-    isolated jump pixels with their 3x3 median:
-      thr=0.3mm = 1.5x layer height 0.2mm — a single-step jump the print
-      can actually show as a spike (sub-layer steps wash out in slicing).
-      rounds=2 — measured diminishing returns beyond (12.3% -> 11.0% -> 10.6%).
-    Real edges survive: a jump line is erosion-stable (neighbors jump too),
-    so it is never classified as isolated.
-    """
-    from scipy.ndimage import binary_erosion, median_filter, generate_binary_structure
-    f = np.asarray(dTop, dtype=np.float64).copy()
-    st = generate_binary_structure(2, 2)
-    for _ in range(rounds):
-        g = np.zeros(f.shape, bool)
-        gx = np.abs(np.diff(f, axis=1))            # (H, W-1)
-        gy = np.abs(np.diff(f, axis=0))            # (H-1, W)
-        g[:-1, :-1] = np.maximum(gx[:-1, :], gy[:, :-1]) > thr
-        iso = g & ~binary_erosion(g, structure=st, border_value=0)
-        if not iso.any():
-            break
-        f = np.where(iso, median_filter(f, size=3), f)
-    return f
 
 
 def resolve_cmy_for_dtop(flat_lab, gamut, dTop, top_tol=0.10, k=64, chunk=8192):

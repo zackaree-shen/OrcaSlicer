@@ -222,8 +222,7 @@ class LithoApi:
                 carve=params.get("carve", "concave"),
                 sharpen=float(params.get("sharpen", 2.0)),
                 contrast=float(params.get("contrast", 1.5)),
-                tone_map=bool(int(float(params.get("tonemap", 1)))),
-                sat_boost=float(params.get("satboost", 1.0)))
+                tone_map=bool(int(float(params.get("tonemap", 1)))))
             elapsed = time.time() - t0
 
             self.last_meshes = meshes
