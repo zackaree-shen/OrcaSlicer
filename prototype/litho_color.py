@@ -232,6 +232,27 @@ DEFAULT_TD = {
 }
 
 
+def correct_td(td, c=1.0, m=1.0, y=1.0, w=1.0):
+    """Return a TD dict with per-color effective density scaled.
+
+    A strength > 1 makes the color "act stronger" in the Beer-Lambert model,
+    so the solver uses *less* of it to reach the same target. This is the
+    printable equivalent of an ICC profile correction: it compensates for
+    filament batches that are denser or weaker than the default TD assumes,
+    without assuming anything about the input image's neutral balance.
+
+    Values are clipped to a small positive floor to avoid division by zero.
+    """
+    def scale(t, s):
+        return tuple(np.clip(np.asarray(t, dtype=np.float64) / max(float(s), 1e-6), 1e-6, None))
+    return {
+        "C": scale(td["C"], c),
+        "M": scale(td["M"], m),
+        "Y": scale(td["Y"], y),
+        "W": scale(td["W"], w),
+    }
+
+
 def forward_transmission(dC, dM, dY, dW, td=None, backlight=(1.0, 1.0, 1.0)):
     """Simulate backlight transmission through the four layers.
 
@@ -681,6 +702,503 @@ def spike_surgery(dT, t_sigma=1.5, iterations=5, top_max=1.5):
     return np.clip(h, 0, top_max)
 
 
+def whiteness_mask(rgb_uint8, min_thresh=230, chroma_thresh=15, sigma=2.0):
+    """Compute a soft 'whiteness' mask in [0,1] from an RGB uint8 image.
+
+    Definition of 'white' (strict, matches Bambu behaviour): the source pixel is
+    both BRIGHT (min(R,G,B) >= min_thresh) and ACHROMATIC (max-min <=
+    chroma_thresh). The binary mask is Gaussian-smoothed (sigma px) to avoid
+    hard seams where the colour transitions into white. Used by the P1 path to
+    gate CMY in white regions: where whiteness ~ 1, dC/dM/dY are zeroed so the
+    top white relief carries the print alone (clean white, no CMY speckle); where
+    whiteness ~ 0 (mid-tones, colour regions), CMY is left untouched.
+    """
+    rgb = np.asarray(rgb_uint8, dtype=np.float64)
+    mn = rgb.min(axis=2)
+    mx = rgb.max(axis=2)
+    chroma = mx - mn
+    is_white = (mn >= min_thresh) & (chroma <= chroma_thresh)
+    if sigma > 0:
+        from scipy.ndimage import gaussian_filter
+        return gaussian_filter(is_white.astype(np.float64), sigma=sigma)
+    return is_white.astype(np.float64)
+
+
+def refine_dtop_surface(dTop, guide_rgb, n_iter=20, kappa=0.08, gamma=0.15,
+                        edge_alpha=0.5, edge_percentile=95):
+    """Edge-aware surface refinement for dTop.
+
+    Goals:
+      - Remove small spikes / high-frequency noise in flat regions, producing a
+        smooth surface.
+      - Preserve strong luminance edges so object boundaries and thin text stay
+        crisp ("棱角封面").
+      - Recover a controlled amount of the original detail at those edges so
+        fine features (e.g. readable letters) are not blurred away.
+
+    Uses Perona-Malik anisotropic diffusion with an image-guide edge map. The
+    diffusion coefficient is derived from the *input image* luminance gradient,
+    not from dTop itself, so noise in dTop is treated as noise and image edges
+    are treated as structure. After diffusion a soft edge mask adds back some
+    of the original dTop detail at the preserved edges only.
+
+    Parameters
+    ----------
+    dTop : (H, W) ndarray
+        Raw thickness relief field (e.g. output of anchored_dtop_field).
+    guide_rgb : (H, W, 3) uint8
+        Preprocessed RGB image used as the structure guide.
+    n_iter, kappa, gamma : Perona-Malik controls.
+        gamma must be <= 0.25 for explicit-scheme stability.
+    edge_alpha : amount of original detail added back at strong edges.
+        0 = fully smoothed, 1 = original detail fully preserved at edges.
+    edge_percentile : percentile used to normalize the guide edge magnitude.
+    """
+    guide = np.asarray(guide_rgb, dtype=np.float64)
+    if guide.ndim == 3:
+        Y = (0.299 * guide[..., 0] + 0.587 * guide[..., 1]
+             + 0.114 * guide[..., 2]) / 255.0
+    else:
+        Y = guide / 255.0
+
+    # Edge magnitude from guide luminance, normalized to [0, 1].
+    gy, gx = np.gradient(Y)
+    edge_mag = np.hypot(gy, gx)
+    denom = np.percentile(edge_mag, edge_percentile) + 1e-9
+    edge_mag = np.clip(edge_mag / denom, 0.0, 1.0)
+
+    # Edge-stopping coefficient: ~1 in flat regions (smooth freely),
+    # ~0 at strong edges (do not blur across them).
+    c = np.exp(-(edge_mag / kappa) ** 2)
+
+    img = np.asarray(dTop, dtype=np.float64).copy()
+    top_max = float(img.max())
+    for _ in range(n_iter):
+        dn = np.zeros_like(img)
+        ds = np.zeros_like(img)
+        de = np.zeros_like(img)
+        dw = np.zeros_like(img)
+        dn[:-1, :] = img[1:, :] - img[:-1, :]
+        ds[1:, :] = img[:-1, :] - img[1:, :]
+        de[:, :-1] = img[:, 1:] - img[:, :-1]
+        dw[:, 1:] = img[:, :-1] - img[:, 1:]
+        img += gamma * c * (dn + ds + de + dw)
+        img = np.clip(img, 0.0, top_max)
+
+    # Soft edge mask: high at strong edges, low in flat regions.
+    edge_mask = 1.0 - np.exp(-(edge_mag / 0.30) ** 2)
+    out = img + edge_alpha * edge_mask * (dTop - img)
+    return np.clip(out, 0.0, top_max)
+
+
+def morph_smooth(dTop, radius=1, iterations=1):
+    """Morphological open-close to suppress tiny spikes and merge fragments.
+
+    Uses scipy.ndimage.grey_opening then grey_closing with a square element of
+    size ``2*radius+1``. A radius of 1 (3x3) removes/isolates single-pixel
+    spikes and merges single-pixel gaps while keeping larger features intact.
+    This is meant as a post-process *after* edge-aware diffusion: it cleans the
+    remaining small fragmented bumps that diffusion left behind.
+
+    Parameters
+    ----------
+    dTop : (H, W) ndarray
+        Relief thickness field in mm.
+    radius : int
+        Structuring-element half-size; 0 disables smoothing.
+    iterations : int
+        Number of open-close passes.
+
+    Returns
+    -------
+    ndarray
+        Smoothed dTop, clipped to the original [min, max] range.
+    """
+    if radius <= 0 or iterations <= 0:
+        return dTop
+    from scipy.ndimage import grey_opening, grey_closing
+    h = np.asarray(dTop, dtype=np.float64)
+    lo, hi = float(h.min()), float(h.max())
+    size = 2 * int(radius) + 1
+    for _ in range(int(iterations)):
+        h = grey_opening(h, size=(size, size))
+        h = grey_closing(h, size=(size, size))
+    return np.clip(h, lo, hi)
+
+
+def merge_cmy_features(rgb_uint8, dC_in, dM_in, dY_in,
+                       lum_tol=0.05, edge_tol=0.03, chroma_tol=8.0,
+                       strength=0.0, min_size=0,
+                       cmy_median_size=0):
+    """Iteration 50: Same plateau consolidation as merge_features but applied
+    to the C/M/Y colour reliefs (NOT the white relief).
+
+    Why a separate function: in chroma_decouple mode CMY is a pure colour
+    field, so it's safe (and desirable) to also smooth it into plateaus —
+    otherwise anti-aliased colour specks in cartoon backgrounds print as the
+    visible "messy walk" the user reported in slice view. The mesh needs
+    "background lines walking cleanly", not high-fidelity colour at every
+    pixel. CMY plateau consolidation in luminance domain (using |dL| and
+    |grad L|) plus a (a*,b*) chroma tolerance gives clean colour plateaus:
+      - All 4 neighbours merge if |dL| < lum_tol AND |grad L| < edge_tol
+        AND |da*| < chroma_tol AND |db*| < chroma_tol
+      - Each component -> MEAN dC, dM, dY within it (stability-preserving).
+      - absorption of specks < min_size: same neighbour-touches rule as
+        merge_features; output dtype stays float64.
+
+    This function NEVER touches the dTop field, so it's safe to enable
+    alongside --chroma-decouple: white relief stays the detail carrier, CMY
+    gets smoother colour regions.
+
+    Parameters analogous to merge_features; chroma_tol is in CIE Lab (a*,b*)
+    units (default 8 ~ barely-perceptible chroma step).
+    """
+    if strength <= 0.0 and min_size <= 0 and (
+            not cmy_median_size or cmy_median_size <= 1):
+        return dC_in, dM_in, dY_in
+    if cmy_median_size and cmy_median_size > 1:
+        from scipy.ndimage import median_filter as _med
+        dC_in = _med(np.asarray(dC_in, dtype=np.float64),
+                     size=int(cmy_median_size))
+        dM_in = _med(np.asarray(dM_in, dtype=np.float64),
+                     size=int(cmy_median_size))
+        dY_in = _med(np.asarray(dY_in, dtype=np.float64),
+                     size=int(cmy_median_size))
+    from scipy.ndimage import gaussian_filter
+    rgb = np.asarray(rgb_uint8, dtype=np.float64)
+    if rgb.ndim == 3:
+        Lraw = srgb8_to_linear(rgb).mean(axis=-1)
+    else:
+        Lraw = srgb8_to_linear(rgb[..., None]).mean(axis=-1)
+    Ls = gaussian_filter(Lraw, sigma=1.0)
+    gy, gx = np.gradient(Ls)
+    gmag = np.hypot(gy, gx)
+    lab = xyz_to_lab(linear_to_xyz(srgb8_to_linear(rgb).reshape(-1, 3)))
+    a = lab[:, 1].reshape(rgb.shape[:2])
+    b = lab[:, 2].reshape(rgb.shape[:2])
+
+    h, w = Ls.shape
+    N = h * w
+    idx = np.arange(N).reshape(h, w)
+    Lf = Ls.ravel()
+    gf = gmag.ravel()
+    af = a.ravel()
+    bf = b.ravel()
+
+    def _pairs(axis):
+        if axis == "r":
+            i = idx[:, :-1].ravel()
+            j = idx[:, 1:].ravel()
+        else:
+            i = idx[:-1, :].ravel()
+            j = idx[1:, :].ravel()
+        m = ((np.abs(Lf[i] - Lf[j]) < lum_tol)
+             & (np.maximum(gf[i], gf[j]) < edge_tol)
+             & (np.abs(af[i] - af[j]) < chroma_tol)
+             & (np.abs(bf[i] - bf[j]) < chroma_tol))
+        return i[m], j[m]
+
+    ar, br = _pairs("r")
+    ad, bd = _pairs("d")
+    pa = np.concatenate([ar, ad])
+    pb = np.concatenate([br, bd])
+
+    right_a = np.arange(N - 1)
+    down_a = np.arange(N - w)
+    pa_all = np.concatenate([right_a, down_a])
+    pb_all = np.concatenate([right_a + 1, down_a + w])
+
+    import scipy.sparse as sp
+    import scipy.sparse.csgraph as csgraph
+
+    if pa.size:
+        rows = np.concatenate([pa, pb])
+        cols = np.concatenate([pb, pa])
+        adj = sp.coo_matrix((np.ones(rows.size, dtype=np.float64),
+                             (rows, cols)), shape=(N, N))
+        _, labels = csgraph.connected_components(adj, directed=False)
+    else:
+        labels = np.arange(N, dtype=np.int64)
+
+    if min_size > 0:
+        labels_2d = labels.reshape(h, w)
+        cl_full = labels[pa_all]
+        cr_full = labels[pb_all]
+        for _ in range(5):
+            counts = np.bincount(labels, minlength=int(labels.max()) + 1)
+            small_mask_full = counts < min_size
+            if not small_mask_full.any():
+                break
+            boundary = cl_full != cr_full
+            if not boundary.any():
+                break
+            cl_b = cl_full[boundary]
+            cr_b = cr_full[boundary]
+            s_small = small_mask_full[cl_b]
+            l_large = ~small_mask_full[cr_b]
+            keep = s_small & l_large
+            if not keep.any():
+                break
+            s_edges = cl_b[keep]
+            l_edges = cr_b[keep]
+            Lmax = int(labels.max()) + 1
+            combined = (s_edges.astype(np.int64) * Lmax
+                        + l_edges.astype(np.int64))
+            uniq, cnt = np.unique(combined, return_counts=True)
+            s_ids = (uniq // Lmax).astype(np.int64)
+            l_ids = (uniq % Lmax).astype(np.int64)
+            order = np.argsort(s_ids, kind="stable")
+            s_sorted = s_ids[order]
+            l_sorted = l_ids[order]
+            c_sorted = cnt[order]
+            changes = np.where(np.diff(s_sorted))[0] + 1
+            group_starts = np.concatenate([[0], changes])
+            group_ends = np.concatenate([changes, [len(s_sorted)]])
+            best_idx = np.empty(len(group_starts), dtype=np.int64)
+            for gi in range(len(group_starts)):
+                a_, b_ = int(group_starts[gi]), int(group_ends[gi])
+                seg_cnt = c_sorted[a_:b_]
+                seg_l = l_sorted[a_:b_]
+                score = seg_cnt.astype(np.int64) * (Lmax + 1) - seg_l
+                best_idx[gi] = a_ + int(np.argmax(score))
+            abs_s = s_sorted[best_idx]
+            abs_l = l_sorted[best_idx]
+            labels_2d = labels_2d.copy()
+            for s, l in zip(abs_s.tolist(), abs_l.tolist()):
+                labels_2d[labels_2d == s] = l
+            labels = labels_2d.ravel()
+            cl_full = labels[pa_all]
+            cr_full = labels[pb_all]
+
+    def _rep(field):
+        f = np.asarray(field, dtype=np.float64).ravel()
+        sums = np.bincount(labels, weights=f, minlength=labels.max() + 1)
+        cnts = np.bincount(labels, minlength=labels.max() + 1)
+        return (sums / np.maximum(cnts, 1))[labels].reshape(h, w)
+
+    merged_C = _rep(dC_in)
+    merged_M = _rep(dM_in)
+    merged_Y = _rep(dY_in)
+    s = float(strength)
+    out_C = (1.0 - s) * dC_in + s * merged_C
+    out_M = (1.0 - s) * dM_in + s * merged_M
+    out_Y = (1.0 - s) * dY_in + s * merged_Y
+    return (np.clip(out_C, 0.0, float(np.asarray(dC_in).max())),
+            np.clip(out_M, 0.0, float(np.asarray(dM_in).max())),
+            np.clip(out_Y, 0.0, float(np.asarray(dY_in).max())))
+
+
+def enforce_dtop_minimum(dTop, dtop_min=0.0, top_max=2.0):
+    """Force the white-relief dTop to be >= dtop_min everywhere (clip to
+    [dtop_min, top_max]). Cures "W cap missing" where recalibration or
+    anchored_dtop_field lets dTop approach 0 in dark areas, exposing the C/M/Y
+    layers above. dtop_min=0 disables (returns input unchanged)."""
+    if dtop_min is None or dtop_min <= 0.0:
+        return dTop
+    return np.clip(np.asarray(dTop, dtype=np.float64),
+                   float(dtop_min), float(top_max))
+
+
+def merge_features(rgb_uint8, dTop_in, top_max=2.0, lum_tol=0.05,
+                   edge_tol=0.03, strength=0.0, min_size=0,
+                   dtop_median_size=0):
+    """Consolidate the white-relief (dTop) geometry into clean plateaus.
+
+    Iteration 48. Goal: "merge features" in the white layer so the overall
+    surface is clean, while preserved edges + height levels still carry the
+    detail/brightness and CMY carries colour. This is a STRONGER consolidation
+    than refine_dtop_surface (diffusion, stability-limited) or morph_smooth
+    (open/close, single-pixel only): it groups neighbouring similar-luminance
+    pixels into one connected region and pins the whole region to a single
+    representative dTop height.
+
+    WHY THE LUMINANCE DOMAIN (not dTop): anchored_dtop_field CDF-equalizes
+    luminance, so a flat noisy patch spreads to a LARGE dTop span (per-pixel
+    +-8 brightness -> huge dTop jumps). A dTop-domain |dTop_a-dTop_b|<tol gate
+    would never trigger on the very noise we want to merge. In the luminance
+    domain the noise is just |dL|~0.03, well below lum_tol, so it merges
+    cleanly; real tonal steps / edges (large |dL|) and ramps (large gradient)
+    are kept as region borders by the two gates.
+
+    Algorithm (union-find via scipy connected_components, pure numpy/scipy,
+    no skimage dependency):
+      1. L = linear luminance of rgb (0..1), g = |grad L| (absolute per px).
+      2. 4-neighbour union if |L_a - L_b| < lum_tol AND max(g_a, g_b) < edge_tol
+         -> truly-flat low-contrast regions (incl. noise) merge; real edges
+            (large |dL|) and ramps (large gradient) stay as region borders.
+      3. Each component -> MEAN dTop_in within it (same units as input, no
+         re-anchoring). merged_dTop pins the whole component to that height.
+      4. out = (1-strength)*dTop_in + strength*merged. strength=0 -> dTop_in
+         unchanged (baseline reproduces byte-for-byte).
+
+    Iteration 49b: tiny noise specks (1-2 px) often FAIL the gate because
+    their own per-pixel |grad L| spikes from the surrounding contrast — they
+    survive as isolated components and read as "salt-and-pepper" spikes in
+    the printed white relief. Add min_size: any connected component smaller
+    than `min_size` pixels is absorbed into its largest 4-neighbouring
+    component (by touching-pixel count). Pure cleanup; the height pinning in
+    step 3 is recomputed on the absorbed labelling. min_size=0 disables.
+
+    Parameters
+    ----------
+    lum_tol : max luminance diff (absolute, linear 0..1) to merge across.
+        v1 coarse tuning: 0.05 ~ 13/255 sRGB step; merges typical sensor
+        noise (+-8/255 ~= 0.03 linear) while keeping real tonal steps. NOT
+        from a published source -- initial value, flagged for背光样张验证.
+    edge_tol : max absolute per-pixel |grad L| to allow merging. 0.03 keeps
+        only near-flat pixels so ramps are preserved (not posterized flat).
+    strength : 0..1 blend weight; 0 disables (no-op, baseline-safe).
+    min_size : int > 0 absorbs connected components smaller than this many
+        pixels into the largest 4-neighbouring component. 0 disables (v1).
+        Real-world cartoon/scan backgrounds have many 1-2 px dark/light
+        specks from anti-aliasing and JPEG that pass neither the |dL| nor
+        the |grad| gate on their own; they MUST be swept into neighbours
+        or the relief prints as noisy gravel. 16-30 is a sane range at
+        0.15-0.30 mm pitch (each pixel ~0.2 mm so 25 px ~= 1 mm^2).
+    """
+    if strength <= 0.0:
+        return dTop_in
+    # Iteration 50: optional MEDIAN pre-filter on dTop. Median is edge-
+    # preserving and kills sub-min_size specks WITHOUT the "this speck is
+    # smaller than min_size so absorb" two-step dance. It also surfaces the
+    # real plateaus the luminance gate can latch onto — so the lab_tol that
+    # follows sees a smoother field and produces larger, cleaner plateaus.
+    # Cheap and parallel with the rest. dtop_median_size must be odd (>=3
+    # = meaningful; size=1 is no-op). 0 disables and keeps v1 behaviour.
+    if dtop_median_size and dtop_median_size > 1:
+        from scipy.ndimage import median_filter as _med
+        # Median operates on the geometry, not the luminance, so it preserves
+        # the local median plateau value rather than blurring into neighbours.
+        # Specks < median half-window get snapped to the surrounding plateau.
+        dTop_in = _med(np.asarray(dTop_in, dtype=np.float64),
+                       size=int(dtop_median_size))
+    from scipy.ndimage import gaussian_filter
+    rgb = np.asarray(rgb_uint8, dtype=np.float64)
+    if rgb.ndim == 3:
+        L = srgb8_to_linear(rgb).mean(axis=-1)
+    else:
+        L = srgb8_to_linear(rgb[..., None]).mean(axis=-1)
+    # EDGE GATE USES GAUSSIAN-SMOOTHED LUMINANCE (sigma=1): per-pixel sensor
+    # noise would otherwise create gradients > edge_tol and shatter the very
+    # flat region we want to merge (measured: levels went UP, not down).
+    # Smoothing averages the noise so flat regions get g~0 (merge freely) while
+    # real edges/ramps keep g>edge_tol (stay as borders). Same lesson as the
+    # earlier adaptive_smooth edge-detection fix.
+    Ls = gaussian_filter(L, sigma=1.0)
+    gy, gx = np.gradient(Ls)
+    g = np.hypot(gy, gx)
+
+    h, w = L.shape
+    N = h * w
+    idx = np.arange(N).reshape(h, w)
+    Lf = Ls.ravel()
+    gf = g.ravel()
+
+    def _pairs(axis):
+        if axis == "r":
+            a = idx[:, :-1].ravel()
+            b = idx[:, 1:].ravel()
+        else:
+            a = idx[:-1, :].ravel()
+            b = idx[1:, :].ravel()
+        da, db = Lf[a], Lf[b]
+        ga, gb = gf[a], gf[b]
+        m = (np.abs(da - db) < lum_tol) & (np.maximum(ga, gb) < edge_tol)
+        return a[m], b[m]
+
+    ar, br = _pairs("r")
+    ad, bd = _pairs("d")
+    pa = np.concatenate([ar, ad])
+    pb = np.concatenate([br, bd])
+    if pa.size == 0:
+        return dTop_in  # nothing satisfied the merge gate -> unchanged
+
+    import scipy.sparse as sp
+    import scipy.sparse.csgraph as csgraph
+    rows = np.concatenate([pa, pb])
+    cols = np.concatenate([pb, pa])
+    adj = sp.coo_matrix((np.ones(rows.size, dtype=np.float64), (rows, cols)),
+                        shape=(N, N))
+    _, labels = csgraph.connected_components(adj, directed=False)
+
+    # Iter 49b: absorb tiny noise components that survived the strict gate.
+    # Uses ALL 4-neighbour pixel pairs (not the union gate's adj) so we can
+    # find inter-component boundary edges. For each boundary edge (ci, cj)
+    # where ci is small and cj is large, mark ci -> cj. Each small component
+    # absorbs to the large neighbour that touches it the most (ties: smallest
+    # label id, reproducible). Iterates until stable (most converge in 1-2
+    # passes; cap at 5 for safety).
+    if min_size > 0:
+        labels_2d = labels.reshape(h, w)
+        N = h * w
+        # All horizontal + vertical 4-neighbour pairs (i, j).
+        right_a = np.arange(N - 1)
+        down_a = np.arange(N - w)
+        pa_all = np.concatenate([right_a, down_a])
+        pb_all = np.concatenate([right_a + 1, down_a + w])
+        cl_full = labels[pa_all]
+        cr_full = labels[pb_all]
+        for _ in range(5):
+            counts = np.bincount(labels, minlength=int(labels.max()) + 1)
+            small_mask_full = counts < min_size
+            if not small_mask_full.any():
+                break
+            boundary = cl_full != cr_full
+            if not boundary.any():
+                break
+            cl_b = cl_full[boundary]
+            cr_b = cr_full[boundary]
+            s_small = small_mask_full[cl_b]
+            l_large = ~small_mask_full[cr_b]
+            keep = s_small & l_large
+            if not keep.any():
+                break
+            s_edges = cl_b[keep]
+            l_edges = cr_b[keep]
+            Lmax = int(labels.max()) + 1
+            combined = (s_edges.astype(np.int64) * Lmax
+                        + l_edges.astype(np.int64))
+            uniq, cnt = np.unique(combined, return_counts=True)
+            s_ids = (uniq // Lmax).astype(np.int64)
+            l_ids = (uniq % Lmax).astype(np.int64)
+            # Per-small-component: pick the large neighbour with most touches.
+            # np.unique sorts ascending, so identical s_ids are contiguous.
+            order = np.argsort(s_ids, kind="stable")
+            s_sorted = s_ids[order]
+            l_sorted = l_ids[order]
+            c_sorted = cnt[order]
+            changes = np.where(np.diff(s_sorted))[0] + 1
+            # Per-group argmax via (count, -label) score so ties pick smallest
+            # label id (reproducible).
+            group_starts = np.concatenate([[0], changes])
+            group_ends = np.concatenate([changes, [len(s_sorted)]])
+            best_idx = np.empty(len(group_starts), dtype=np.int64)
+            for gi in range(len(group_starts)):
+                a, b = int(group_starts[gi]), int(group_ends[gi])
+                seg_cnt = c_sorted[a:b]
+                seg_l = l_sorted[a:b]
+                score = seg_cnt.astype(np.int64) * (Lmax + 1) - seg_l
+                best_idx[gi] = a + int(np.argmax(score))
+            abs_s = s_sorted[best_idx]
+            abs_l = l_sorted[best_idx]
+            labels_2d = labels_2d.copy()
+            for s, l in zip(abs_s.tolist(), abs_l.tolist()):
+                labels_2d[labels_2d == s] = l
+            labels = labels_2d.ravel()
+            # Recompute boundary edges against new labelling.
+            cl_full = labels[pa_all]
+            cr_full = labels[pb_all]
+
+    dTop_f = np.asarray(dTop_in, dtype=np.float64).ravel()
+    sums = np.bincount(labels, weights=dTop_f, minlength=labels.max() + 1)
+    counts = np.bincount(labels, minlength=labels.max() + 1)
+    rep = sums / np.maximum(counts, 1)
+    merged = rep[labels].reshape(h, w)
+
+    out = (1.0 - strength) * dTop_in + strength * merged
+    return np.clip(out, 0.0, float(dTop_f.max()))
+
+
 def anchored_dtop_field(rgb, td_w=5.4, top_max=2.0, p_low=0.5, p_high=99.5):
     """P1a-v2: monotone luminance->dTop field via optical-density-domain CDF
     equalization (iteration 45; supersedes tone_mapping_preprocess).
@@ -781,6 +1299,136 @@ def resolve_cmy_for_dtop(flat_lab, gamut, dTop, top_tol=0.10, k=64, chunk=8192):
         res_idx[s:e] = nbrs[rows, best]
     return (res_t[:, 1].reshape(h, w), res_t[:, 2].reshape(h, w),
             res_t[:, 3].reshape(h, w), res_dE.reshape(h, w), res_idx.reshape(h, w))
+
+
+def resolve_cmy_chroma_only(target_lab, gamut, dTop, k=64, chunk=8192):
+    """Chroma-only CMY solve (iteration 49): CMY carries ONLY hue/saturation;
+    the white relief (dTop, supplied by the caller) carries ALL luminance.
+
+    This is the inverse of resolve_cmy_for_dtop's contract: that function
+    matches the full Lab (L*,a*,b*) so CMY also fudges brightness; here we pick
+    the gamut card entry whose (a*,b*) is closest to the target's (a*,b*) and
+    IGNORE L*. Rationale: DEFAULT_TD["W"]=(5.4,5.4,5.4) is perfectly neutral, so
+    the caller's dTop alone fixes luminance — CMY must not re-touch it. This
+    realises the user's "K(W)=shading, CMY=colour" separation, and it makes CMY
+    safe to smooth/merge afterwards without disturbing the sharp white detail
+    (text, edges live in the white relief).
+
+    No dTop band constraint (the caller owns dTop); we search the WHOLE card for
+    the best (a,b) match — a band would only wrongly exclude out-of-band entries
+    (adversarial review iteration 49b). dTop is used ONLY for its .shape; its
+    values are not read.
+
+    Returns (dC, dM, dY, dE, idx) each shaped like dTop. dE here is the (a,b)
+    chroma distance (the engine recomputes an honest forward-model dE anyway).
+    """
+    from scipy.spatial import cKDTree
+    target_lab = np.asarray(target_lab, dtype=np.float64)
+    dTop = np.asarray(dTop, dtype=np.float64)
+    h, w = dTop.shape
+    gamut_lab = gamut["lab"]
+    gamut_t = gamut["thickness"]
+    gamut_ab = gamut_lab[:, 1:3]            # (a*, b*) subspace
+    tree = cKDTree(gamut_ab)
+    kk = min(k, len(gamut_ab))
+    n = target_lab.shape[0]
+    res_t = np.empty((n, 4))
+    res_dE = np.empty(n)
+    res_idx = np.empty(n, dtype=np.int64)
+    for s in range(0, n, chunk):
+        e = min(s + chunk, n)
+        tgt_ab = target_lab[s:e, 1:3]                 # (chunk, 2)
+        _, nbrs = tree.query(tgt_ab, k=kk)
+        nbrs = np.atleast_2d(nbrs)
+        kk2 = nbrs.shape[1]
+        cand_ab = gamut_ab[nbrs]                       # (chunk, kk2, 2)
+        diff = tgt_ab[:, None, :] - cand_ab
+        dist_ab = np.sqrt((diff ** 2).sum(axis=-1))    # (chunk, kk2)
+        best = np.argmin(dist_ab, axis=1)
+        rows = np.arange(e - s)
+        res_t[s:e] = gamut_t[nbrs[rows, best]]
+        res_dE[s:e] = dist_ab[rows, best]
+        res_idx[s:e] = nbrs[rows, best]
+    return (res_t[:, 1].reshape(h, w), res_t[:, 2].reshape(h, w),
+            res_t[:, 3].reshape(h, w), res_dE.reshape(h, w), res_idx.reshape(h, w))
+
+
+def recalibrate_dtop_for_luminance(target_lab, dC, dM, dY, dTop, td=None,
+                                   dW=WHITE_THICKNESS, top_max=TOP_BAND_MAX):
+    """Iteration 49: after CMY is solved for CHROMA ONLY (so it no longer
+    compensates brightness), recalculate the white relief (dTop) so the white
+    layer precisely carries the target LUMINANCE.
+
+    WHY THIS IS NEEDED: with chroma_decouple, CMY picks the card entry closest
+    in (a*,b*) and never touches L*. The white relief dTop then comes from
+    anchored_dtop_field (CDF-equalization), which maps luminance into the
+    printable band *approximately* — measured dE exploded 7.03 -> 11.27 once
+    CMY stopped fudging brightness, because the equalized dTop no longer hit
+    the target luminance. This pass fixes it.
+
+    WHY IT IS EXACT: DEFAULT_TD["W"] = (5.4, 5.4, 5.4) is perfectly neutral, so
+    the white layer (W base + top) transmits a single grey scalar
+
+        s = 10^(-(dW + dTop) / tdw)            (same in R,G,B)
+
+    The CMY layer transmits a 3-channel colour
+
+        tau_cmy = 10^(-(dC/tdc + dM/tdm + dY/tdy))
+
+    so the full stack's linear luminance is exactly s * Y_cmy (luminance is
+    linear in the transmission). We simply pick s = Y_target / Y_cmy so the
+    product equals the target linear luminance, then invert to dTop:
+
+        dTop = -tdw * log10(s) - dW = -tdw*log10(Y_target / Y_cmy) - dW
+
+    Because L* is a monotonic function of luminance, hitting Y_target exactly
+    also lands L* at the target. The (a,b) chroma stays whatever CMY produced
+    (CMY was solved for chroma), so the only thing this pass changes is the
+    white brightness — which is exactly the decoupling contract.
+
+    Bounds: dTop is clipped to [0, top_max]; equivalently s is clipped to
+    [10^(-(dW+top_max)/tdw), 10^(-dW/tdw)]. Targets outside the white layer's
+    reach (e.g. a near-white pixel whose dTop floor is clipped to 0) keep their
+    brightest achievable output (physical: the white base caps maximum
+    brightness).
+
+    target_lab : (H,W,3) or (N,3) Lab of the target to match LUMINANCE against
+        (use the ORIGINAL image, not the preprocessed one, so the printed
+        result matches what the user sees — adversarial review B3).
+    dC,dM,dY   : CMY thickness fields (already chroma-solved), same shape.
+    dTop       : current white relief; used ONLY for its .shape (re-derived here).
+    Returns dTop_new (same shape), clipped to [0, top_max].
+    """
+    if td is None:
+        td = DEFAULT_TD
+    target_lab = np.asarray(target_lab, dtype=np.float64).reshape(-1, 3)
+    dC = np.asarray(dC, dtype=np.float64)
+    dM = np.asarray(dM, dtype=np.float64)
+    dY = np.asarray(dY, dtype=np.float64)
+    dTop = np.asarray(dTop, dtype=np.float64)
+    tdw = float(np.asarray(td["W"], dtype=np.float64)[0])
+
+    # Target linear luminance from L* (CIE: fy^3 for L*>7.999 else L*/903.3).
+    L = target_lab[:, 0]
+    fy = (L + 16.0) / 116.0
+    Y_t = np.where(L > 7.999, fy ** 3, L / 903.3)
+    Y_t = np.clip(Y_t, 0.0, 1.0)
+
+    # CMY-only transmission (NO white base): tau = 10^(-(dC/tdc + dM/tdm + dY/tdy)).
+    tau_cmy = forward_stacked(np.zeros_like(dC), dC, dM, dY, td=td, dW=0.0)
+    tau_cmy = tau_cmy.reshape(-1, 3)
+    Y_cmy = np.clip(0.2126 * tau_cmy[:, 0] + 0.7152 * tau_cmy[:, 1]
+                    + 0.0722 * tau_cmy[:, 2], 1e-6, 1.0)
+
+    # Neutral white-layer scalar that makes s * Y_cmy == Y_target.
+    white_scalar = Y_t / Y_cmy
+    lo = 10.0 ** (-(dW + top_max) / tdw)
+    hi = 10.0 ** (-dW / tdw)
+    white_scalar = np.clip(white_scalar, lo, hi)
+
+    dTop_new = -tdw * np.log10(white_scalar) - dW
+    dTop_new = np.clip(dTop_new, 0.0, top_max)
+    return dTop_new.reshape(dTop.shape)
 
 
 def solve_stacked(target_srgb, gamut, chunk=4096, k=32, exact=False,
@@ -1025,7 +1673,7 @@ def _smooth_top_resolve(dTop, dC, dM, dY, dE, idx, flat_lab, gamut,
 
 def color_lithophane_stacked(rgb_image, params=None, td=None, layers_max=8, layer_h=0.08,
                              dW=WHITE_THICKNESS, top_max=TOP_BAND_MAX, exact=False,
-                             pitch_cmy=0.8, pitch_top=0.25):
+                             pitch_cmy=0.30, pitch_top=0.15):
     """Generate the 5 stacked-layer meshes (W / C / M / Y / top) for a color image.
 
     Dual-resolution (Bambu-style): C/M/Y use a COARSE grid (pitch_cmy) because

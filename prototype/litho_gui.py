@@ -111,16 +111,20 @@ class LithophaneApp(tk.Tk):
 
         row = 0
         param_row(row, "Width (mm)", 144.0, "w_var"); row += 1
-        param_row(row, "Height (mm)", 108.0, "h_var"); row += 1
-        param_row(row, "Max layers / color", 8, "layers_var"); row += 1
-        param_row(row, "Layer height (mm)", 0.2, "layerh_var"); row += 1
-        param_row(row, "White base (mm)", 0.30, "dw_var"); row += 1
-        param_row(row, "Pixel pitch (mm)", 0.3, "pitch_var"); row += 1
+        param_row(row, "Height (mm)", 81.0, "h_var"); row += 1
+        param_row(row, "Max layers / color", 6, "layers_var"); row += 1
+        param_row(row, "Layer height (mm)", 0.12, "layerh_var"); row += 1
+        param_row(row, "White base (mm)", 0.20, "dw_var"); row += 1
+        param_row(row, "Top relief max (mm)", 1.2, "topmax_var"); row += 1
+        param_row(row, "Pixel pitch (mm)", 0.15, "pitch_var"); row += 1
+        param_row(row, "Top mesh pitch (mm)", 0.15, "pitchtop_var"); row += 1
+        param_row(row, "CMY mesh pitch (mm)", 0.30, "pitchcmy_var"); row += 1
+        param_row(row, "Detail level (0-1)", 1.0, "detail_var", 0.0, 1.0); row += 1
 
         ttk.Separator(right).grid(row=row, column=0, columnspan=2, sticky="we", pady=6); row += 1
 
         ttk.Label(right, text="Mode:").grid(row=row, column=0, sticky="w", pady=2)
-        self.mode_var = tk.StringVar(value=LithoMode.LAYERED.value)
+        self.mode_var = tk.StringVar(value=LithoMode.OVERLAP.value)
         self.mode_cb = ttk.Combobox(right, textvariable=self.mode_var, state="readonly",
                                     values=[m.value for m in LithoMode], width=10)
         self.mode_cb.grid(row=row, column=1, sticky="we", padx=4, pady=2)
@@ -145,8 +149,24 @@ class LithophaneApp(tk.Tk):
         ttk.Label(right, text="(weak channels fixed at TD=3.0)", foreground="#777").grid(
             row=row, column=0, columnspan=2, sticky="w"); row += 1
 
+        ttk.Separator(right).grid(row=row, column=0, columnspan=2, sticky="we", pady=6); row += 1
+
+        ttk.Label(right, text="Color strength correction:", font=("", 9, "bold")).grid(
+            row=row, column=0, columnspan=2, sticky="w"); row += 1
+        ttk.Label(right, text=">1 makes solver use less of that color", foreground="#777").grid(
+            row=row, column=0, columnspan=2, sticky="w"); row += 1
+        param_row(row, "Cyan strength", 1.0, "c_str_var", 0.1, 5.0); row += 1
+        param_row(row, "Magenta strength", 1.0, "m_str_var", 0.1, 5.0); row += 1
+        param_row(row, "Yellow strength", 1.0, "y_str_var", 0.1, 5.0); row += 1
+        param_row(row, "White strength", 1.0, "w_str_var", 0.1, 5.0); row += 1
+
         self.exact_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(right, text="Exact mode (slow)", variable=self.exact_var,
+                        command=self._schedule_auto).grid(
+            row=row, column=0, columnspan=2, sticky="w"); row += 1
+
+        self.surface_refine_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(right, text="Edge-aware surface refine", variable=self.surface_refine_var,
                         command=self._schedule_auto).grid(
             row=row, column=0, columnspan=2, sticky="w"); row += 1
 
@@ -280,6 +300,10 @@ class LithophaneApp(tk.Tk):
         )
         layers = int(gv("layers_var", 1, 30, "Max layers"))
         layer_h = gv("layerh_var", 0.02, 0.5, "Layer height")
+        top_max = gv("topmax_var", 0.05, 5.0, "Top relief max")
+        pitch_top = gv("pitchtop_var", 0.02, 20.0, "Top mesh pitch")
+        pitch_cmy = gv("pitchcmy_var", 0.02, 20.0, "CMY mesh pitch")
+        detail_level = gv("detail_var", 0.0, 1.0, "Detail level")
         td = {
             "C": (gv("tdc_var", 0.05, 2.0, "Cyan TD"), 3.0, 3.0),
             "M": (3.0, gv("tdm_var", 0.05, 2.0, "Magenta TD"), 3.0),
@@ -289,36 +313,39 @@ class LithophaneApp(tk.Tk):
         mode = LithoMode(self.mode_var.get())
         order = ColorOrder(self.order_var.get())
         exact = self.exact_var.get()
-        return params, layers, layer_h, td, mode, order, exact
+        surface_refine = self.surface_refine_var.get()
+        c_str = gv("c_str_var", 0.1, 5.0, "Cyan strength")
+        m_str = gv("m_str_var", 0.1, 5.0, "Magenta strength")
+        y_str = gv("y_str_var", 0.1, 5.0, "Yellow strength")
+        w_str = gv("w_str_var", 0.1, 5.0, "White strength")
+        return (params, layers, layer_h, td, mode, order, exact,
+                top_max, pitch_top, pitch_cmy, detail_level, surface_refine,
+                c_str, m_str, y_str, w_str)
 
     def build(self):
         if self.rgb is None or self._building:
             return
         try:
-            params, layers, layer_h, td, mode, order, exact = self._read_ui()
+            (params, layers, layer_h, td, mode, order, exact,
+             top_max, pitch_top, pitch_cmy, detail_level, surface_refine,
+             c_str, m_str, y_str, w_str) = self._read_ui()
         except ValueError as e:
             messagebox.showerror("Invalid parameter", str(e))
             return
 
         # ---- Grid-size guard (blocks OOM before it happens) ----
         # The solver grid scales as width*height/pitch^2, and the geometry
-        # grids (pitch_cmy=0.8, pitch_top=0.25) scale the same way. We clamp the
-        # effective pitch so ALL grids stay bounded (MAX_POINTS), which makes
-        # large images (e.g. 4000x3000 mm from 1px=1mm default) buildable
-        # instead of crashing or hanging.
+        # grids use the user-supplied pitch_top/pitch_cmy. We clamp the
+        # effective pitch so ALL grids stay bounded (MAX_POINTS).
         from litho_core import thickness_grid_shape
         MAX_POINTS = 600_000
         gx0, gy0 = thickness_grid_shape(self.rgb.shape[0], self.rgb.shape[1], params)
         n0 = gx0 * gy0
-        # top geometry grid uses base pitch 0.25 (finer than solver 0.3), so its
-        # grid is the binding constraint.
-        n_top0 = (int(params.width_mm / 0.25) + 1) * (int(params.height_mm / 0.25) + 1)
+        # The finest geometry grid is usually pitch_top.
+        n_top0 = (int(params.width_mm / pitch_top) + 1) * (int(params.height_mm / pitch_top) + 1)
         worst = max(n0, n_top0)
         if worst > MAX_POINTS:
-            # thickness_grid_shape uses round(width/pitch)+1, so a safety factor
-            # (1.1) guarantees the rescaled grids are strictly <= MAX_POINTS.
             scale = (worst / MAX_POINTS) ** 0.5 * 1.1
-            # Raise the user pitch by `scale` so grid points drop below MAX.
             base_pitch = max(params.pixel_pitch_mm, 1e-3)
             eff_pitch = base_pitch * scale
             params = LithophaneParams(
@@ -326,12 +353,10 @@ class LithophaneApp(tk.Tk):
                 pixel_pitch_mm=eff_pitch,
                 base_thickness=params.base_thickness,
                 depth_range=params.depth_range)
-            pitch_cmy = 0.8 * scale
-            pitch_top = 0.25 * scale
+            pitch_cmy = pitch_cmy * scale
+            pitch_top = pitch_top * scale
             self._log(f"[auto] grid {worst:,} pts > {MAX_POINTS:,}; "
                       f"raised pitch to {eff_pitch:.2f}mm to keep it buildable")
-        else:
-            pitch_cmy, pitch_top = 0.8, 0.25
 
         rgb = self.rgb.copy()
         self._building = True
@@ -345,9 +370,15 @@ class LithophaneApp(tk.Tk):
                 meshes, dE, gamut, reached = color_lithophane_engine(
                     rgb, mode=mode, order=order, params=params, td=td,
                     layers_max=layers, layer_h=layer_h, exact=exact,
-                    pitch_cmy=pitch_cmy, pitch_top=pitch_top)
+                    top_max=top_max,
+                    pitch_cmy=pitch_cmy, pitch_top=pitch_top,
+                    surface_refine=surface_refine, detail_level=detail_level,
+                    c_strength=c_str, m_strength=m_str,
+                    y_strength=y_str, w_strength=w_str)
                 elapsed = time.time() - t0
-                self._result_q.put(("ok", meshes, dE, gamut, reached, elapsed, params, mode, order))
+                self._result_q.put(("ok", meshes, dE, gamut, reached, elapsed,
+                                    params, mode, order, top_max, detail_level,
+                                    surface_refine, c_str, m_str, y_str, w_str))
             except Exception as e:  # noqa: BLE001
                 self._result_q.put(("err", str(e)))
         self._worker = threading.Thread(target=worker, daemon=True)
@@ -363,9 +394,13 @@ class LithophaneApp(tk.Tk):
             return
         kind = msg[0]
         if kind == "ok":
-            (_, meshes, dE, gamut, reached, elapsed, params, mode, order) = msg
+            (_, meshes, dE, gamut, reached, elapsed, params, mode, order,
+             top_max, detail_level, surface_refine,
+             c_str, m_str, y_str, w_str) = msg
             self._building = False
             self.btn_build.config(state="normal", text="2. Build + preview")
+            # Meshes are already Y-flipped by the engine so the top view reads
+            # like the original image (image top -> +Y).
             self._last = (meshes, dE, params, mode, order)
             self.btn_export.config(state="normal")
             if reached is not None:

@@ -24,11 +24,13 @@ from litho_3mf import assemble_lithophane_parts, write_3mf
 
 
 def run_mode(rgb, mode, order, outdir, printer="Snapmaker U1",
-             pitch_cmy=None, pitch_top=None):
+             pitch_cmy=None, pitch_top=None, pixel_pitch_mm=0.15,
+             surface_refine=False):
     """Generate one algorithm's meshes and write 3MF + 5 STLs into outdir.
 
     pitch_cmy/pitch_top: optional per-mode grid overrides (BAMBU uses the
-    finer Bambu-reference resolution 0.44 / 0.22mm vs the 0.8 / 0.25 default).
+    high-detail 0.30 / 0.15 mm grids by default).
+    surface_refine: enable edge-aware surface refinement (recommended for BAMBU).
     """
     os.makedirs(outdir, exist_ok=True)
 
@@ -37,11 +39,12 @@ def run_mode(rgb, mode, order, outdir, printer="Snapmaker U1",
     w_px, h_px = rgb.shape[1], rgb.shape[0]
     scale = TARGET_LONG_MM / max(w_px, h_px)
     params = LithophaneParams(width_mm=w_px * scale, height_mm=h_px * scale,
-                              pixel_pitch_mm=0.3)
+                              pixel_pitch_mm=pixel_pitch_mm)
 
     meshes, dE, gamut, reached = color_lithophane_engine(
         rgb, mode=mode, order=order, params=params, exact=False,
-        pitch_cmy=pitch_cmy or 0.8, pitch_top=pitch_top or 0.25)
+        pitch_cmy=pitch_cmy or 0.30, pitch_top=pitch_top or 0.15,
+        surface_refine=surface_refine)
 
     # --- 3MF composite export ---
     parts, offsets, names, extruders = assemble_lithophane_parts(meshes)
@@ -81,14 +84,19 @@ def main():
         ("interleaved", LithoMode.INTERLEAVED, ColorOrder.MIXED, None, None),
         ("stacked",    LithoMode.STACKED,     ColorOrder.CMY, None, None),
         ("overlap",    LithoMode.OVERLAP,     ColorOrder.MIXED, None, None),
-        ("bambu",      LithoMode.BAMBU,       ColorOrder.MIXED, 0.44, 0.22),
+        ("bambu",      LithoMode.BAMBU,       ColorOrder.MIXED, 0.30, 0.15, True),
     ]
 
-    for name, mode, order, pc, pt in jobs:
+    for job in jobs:
+        name, mode, order = job[0], job[1], job[2]
+        pc = job[3] if len(job) > 3 else None
+        pt = job[4] if len(job) > 4 else None
+        sr = job[5] if len(job) > 5 else False
         outdir = os.path.join(out_root, name)
         try:
             params, dE = run_mode(rgb, mode, order, outdir,
-                                  pitch_cmy=pc, pitch_top=pt)
+                                  pitch_cmy=pc, pitch_top=pt,
+                                  surface_refine=sr)
             med = float(np.median(dE)) if dE is not None else float("nan")
             print(f"  {name:15s}: size {params.width_mm:.0f}x{params.height_mm:.0f}mm, "
                   f"dE_med={med:.2f}  -> {outdir}")

@@ -35,6 +35,7 @@ from litho_color import (
     solve_stacked,
     _resample,
     _resample_rgb,
+    refine_dtop_surface,
     DEFAULT_TD,
     WHITE_THICKNESS,
     COLOR_BAND_MAX,
@@ -210,6 +211,20 @@ def _pixel_boxes_mesh(mask, thickness, z_lo, z_hi, dx, dy):
     return np.array(verts, dtype=np.float64), np.array(faces, dtype=np.int64)
 
 
+def _flip_mesh_y(mesh, height_mm):
+    """Mirror mesh along the build-plate Y axis so the top view reads like the
+    source image (image top -> +Y). Preserves outward face winding."""
+    verts, faces = mesh
+    if len(verts) == 0:
+        return verts, faces
+    v = verts.copy()
+    v[:, 1] = height_mm - v[:, 1]
+    # Mirror reverses orientation; swap two vertex indices per triangle to keep
+    # faces outward-facing (and positive signed volume).
+    f = faces[:, [0, 2, 1]].copy()
+    return v, f
+
+
 # ---------------------------------------------------------------------------
 # Main engine
 # ---------------------------------------------------------------------------
@@ -217,14 +232,48 @@ def _pixel_boxes_mesh(mask, thickness, z_lo, z_hi, dx, dy):
 def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.CMY,
                             params=None, td=None, layers_max=8, layer_h=0.08,
                             dW=WHITE_THICKNESS, top_max=TOP_BAND_MAX, exact=False,
-                            pitch_cmy=0.8, pitch_top=0.10, smooth_top=True,
+                            pitch_cmy=0.30, pitch_top=0.15, smooth_top=True,
                             carve="concave", sharpen=2.0, contrast=1.5,
-                            tone_map=True):
+                            tone_map=True, surface_refine=False, detail_level=1.0,
+                            c_strength=1.0, m_strength=1.0, y_strength=1.0,
+                            w_strength=1.0, flip_y=True,                             white_collapse=True,
+                            merge_features=0.0, merge_min_size=0,
+                            chroma_decouple=False,
+                            cmy_smooth=0.0, recalib_luminance=False,
+                            dtop_median_size=0,
+                            cmy_merge_features=0.0,
+                            cmy_merge_min_size=0,
+                            cmy_merge_chroma_tol=8.0,
+                            cmy_median_size=0,
+                            dtop_min=0.0):
     """Generate lithophane meshes under a given mode and color order.
 
     sharpen/contrast: image preprocessing applied to the luminance channel
     BEFORE solving (hue-preserving). Improves edge sharpness / detail in the
     relief. Default sharpen=2.0, contrast=1.5 (mild).
+
+    detail_level: 0.0 = maximum smoothing / region merging (sacrifices fine
+    detail for printability); 1.0 = preserve as much detail as possible. Maps
+    to edge-aware refinement strength and morphological clean-up radius.
+
+    c/m/y/w_strength: per-color effective density correction. >1 makes that
+    color "stronger" in the model, so the solver uses less of it. Use this to
+    compensate for filament color cast (e.g. y_strength=1.2 to reduce yellow).
+
+    flip_y: if True (default), mirror the mesh along the build-plate Y axis so
+    the top view reads like the original image (image top -> +Y). Set False to
+    keep the legacy orientation where image top maps to -Y.
+
+    chroma_decouple: CMY carries ONLY hue/saturation; the white relief carries
+        ALL luminance (K-style shading). Makes CMY safe to smooth (cmy_smooth)
+        without hurting detail. Requires recalib_luminance=True to also fix the
+        white-layer brightness (otherwise dE is inflated because the equalized
+        dTop no longer matches the target luminance).
+
+    recalib_luminance: only meaningful with chroma_decouple=True. Re-derives dTop
+        so the neutral white layer hits the target L* exactly (s = Y_target/
+        Y_cmy). Cures the dE explosion measured when decoupling. No-op unless
+        chroma_decouple is also True.
 
     Returns (meshes, dE, gamut, reached_rgb) where meshes maps color -> mesh.
     Keys: 'W','C','M','Y','top' always present (C/M/Y boxes may be empty in
@@ -234,6 +283,19 @@ def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.
         params = LithophaneParams()
     if td is None:
         td = DEFAULT_TD
+
+    # Per-color density correction (printer-profile style). Applied once here
+    # and used for gamut + forward evaluation so solver and honest dE agree.
+    from litho_color import correct_td
+    td = correct_td(td, c=c_strength, m=m_strength, y=y_strength, w=w_strength)
+
+    # detail_level maps to a controlled detail/smoothness trade-off.
+    # 0.0 -> heavy smoothing + region merging; 1.0 -> crisp detail.
+    detail_level = float(np.clip(detail_level, 0.0, 1.0))
+    edge_alpha = 0.20 + 0.60 * detail_level          # 0.20 .. 0.80
+    morph_radius = int(round(3.0 * (1.0 - detail_level)))  # 3 .. 0
+    refine_gamma = 0.10 + 0.12 * (1.0 - detail_level)      # 0.22 .. 0.10
+    refine_iter = int(round(20 + 40 * (1.0 - detail_level)))  # 60 .. 20
 
     # MIXED is a valid *order label* ONLY for the same-base modes
     # (INTERLEAVED / OVERLAP / BAMBU, Bambu 方案B). LAYERED + MIXED is a user
@@ -253,7 +315,7 @@ def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.
     # the ORIGINAL image for honest dE reporting (adversarial review B3: the
     # old dE was computed against the tone-mapped image — a self-flattering
     # metric).
-    _p1 = tone_map and mode == LithoMode.BAMBU
+    _p1 = tone_map and mode in (LithoMode.BAMBU, LithoMode.OVERLAP)
     if _p1:
         _p1_orig = rgb_image.copy()
     # Image preprocessing (sharpen + contrast on luminance, hue-preserving).
@@ -272,8 +334,11 @@ def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.
     # capped at the reference band height (band=0.7) so the white relief
     # plate ALWAYS sits above the color band (never punched through).
     if mode == LithoMode.OVERLAP:
-        from litho_color import build_gamut_overlap
-        gamut = build_gamut_overlap(layers_max=layers_max, layer_h=layer_h,
+        # OVERLAP now uses the same high-detail P1 solver path as BAMBU
+        # (anchored_dtop_field + resolve_cmy_for_dtop) so its surface detail
+        # matches BAMBU-like quality, while the mesh still prints as thin
+        # overlapping C/M/Y bands plus a white relief that follows the fill top.
+        gamut = build_gamut_stacked(layers_max=layers_max, layer_h=layer_h,
                                     top_max=top_max, dW=dW, td=td)
     elif mode == LithoMode.BAMBU:
         # Reference (measured lithophane_谢bro_U1): C/M/Y band ~[0.2, 0.9]
@@ -302,32 +367,143 @@ def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.
     if _p1:
         from litho_color import (anchored_dtop_field, resolve_cmy_for_dtop,
                                  spike_surgery, forward_stacked,
+                                 merge_features as _merge_features,
+                                 merge_cmy_features as _merge_cmy,
+                                 enforce_dtop_minimum as _dtop_min_clip,
                                  xyz_to_lab, linear_to_xyz, srgb8_to_linear,
                                  _dE2000_pair)
         # (a) monotone anchored dTop from the SAME image the solver saw.
         dTop = anchored_dtop_field(small, td_w=td["W"][0], top_max=top_max)
+        # (a2) edge-aware surface refinement: smooth flats, preserve edges.
+        # detail_level drives the smoothing strength; surface_refine=False
+        # disables it entirely and falls back to legacy spike surgery.
+        if surface_refine:
+            dTop = refine_dtop_surface(dTop, small, edge_alpha=edge_alpha,
+                                       gamma=refine_gamma, n_iter=refine_iter)
+        # (a3) FEATURE MERGE (iteration 48): consolidate the white-relief
+        # geometry into clean plateaus. Works in the LUMINANCE domain (not
+        # dTop) so the equalization-amplified per-pixel noise spikes — which
+        # have tiny luminance diffs (~0.03) but huge dTop jumps — are merged
+        # naturally (lum_tol >> noise), while real tonal steps / edges are
+        # preserved by the |dL| and gradient gates. Merged luminance is mapped
+        # through the same monotone rank anchor, so the output is a valid
+        # continuous dTop the CMY re-solve below can pin to. strength=0 is a
+        # no-op so the std-overlap-detail-v2 baseline reproduces byte-for-byte.
+        if merge_features > 0.0:
+            dTop = _merge_features(small, dTop, top_max=top_max,
+                                  lum_tol=0.05, edge_tol=0.03,
+                                  strength=merge_features,
+                                  min_size=merge_min_size,
+                                  dtop_median_size=dtop_median_size)
         # (b) re-solve C/M/Y with dTop pinned (kills the CMY-lattice sawtooth
         # where solver-chosen dTop snapped back to top_max across cells).
         flat_lab = xyz_to_lab(linear_to_xyz(
             srgb8_to_linear(small).reshape(-1, 3))).reshape(-1, 3)
-        dC, dM, dY, dE, idx = resolve_cmy_for_dtop(flat_lab, gamut, dTop)
-        # (c) one-shot spike surgery on the continuous field (iteration 44
-        # config: t=1.5, it=2 — no double smoothing).
-        dTop = spike_surgery(dTop, t_sigma=1.5, iterations=2, top_max=top_max)
+        # ORIGINAL (unpreprocessed) target Lab, kept consistent across the
+        # chroma solve, luminance recalibration and honest dE so the printed
+        # result matches what the user sees (adversarial review B3). With
+        # chroma_decouple the CMY hue/saturation MUST be matched against THIS
+        # (not the preprocessed `small`) — otherwise contrast/sharpen shift the
+        # (a*,b*) target and saturated artwork comes out the wrong colour.
+        if _p1_orig is not None:
+            _orig_small = _resample_rgb(_p1_orig, small.shape[:2])
+            flat_lab_orig = xyz_to_lab(linear_to_xyz(
+                srgb8_to_linear(_orig_small))).reshape(-1, 3)
+        else:
+            flat_lab_orig = flat_lab
+        if chroma_decouple:
+            # Iteration 49: CMY carries ONLY chroma; the white relief (dTop)
+            # keeps ALL luminance. So we solve CMY for (a*,b*) only and never
+            # let it fudge brightness. dTop (already anchored + refined +
+            # merged) stays the sharp, detail-carrying brightness layer.
+            from litho_color import resolve_cmy_chroma_only
+            dC, dM, dY, dE, idx = resolve_cmy_chroma_only(
+                flat_lab_orig, gamut, dTop)
+        else:
+            dC, dM, dY, dE, idx = resolve_cmy_for_dtop(flat_lab, gamut, dTop)
+        # Optional CMY smoothing. Safe ONLY because chroma_decouple makes CMY a
+        # pure colour channel: blurring it cannot hurt brightness/detail (that
+        # lives in the white relief). This is what lets coloured backgrounds
+        # stay smooth while text/edges (white) stay razor sharp.
+        if cmy_smooth > 0.0:
+            from scipy.ndimage import gaussian_filter
+            dC = gaussian_filter(dC, sigma=cmy_smooth)
+            dM = gaussian_filter(dM, sigma=cmy_smooth)
+            dY = gaussian_filter(dY, sigma=cmy_smooth)
+        # Iteration 50: CMY plateau consolidation (merge_cmy_features).
+        # Distinct from gaussian cmy_smooth: this is edge-preserving and
+        # PLATEAU-forming (one height per clean region) — exactly what kills
+        # the "messy background walk" reported in slice view. Strength 0
+        # means no-op so it is baseline-safe.
+        if cmy_merge_features > 0.0 or cmy_merge_min_size > 0 or (
+                cmy_median_size and cmy_median_size > 1):
+            dC, dM, dY = _merge_cmy(
+                small, dC, dM, dY,
+                lum_tol=0.05, edge_tol=0.03, chroma_tol=cmy_merge_chroma_tol,
+                strength=cmy_merge_features, min_size=cmy_merge_min_size,
+                cmy_median_size=cmy_median_size)
+        # White-collapse (matches Bambu behaviour): in near-white source regions
+        # the TOP white relief alone should carry the print; zero out C/M/Y to
+        # eliminate the CMY speckle visible in white areas. Mid-tones and colour
+        # regions are untouched (whiteness_mask ~ 0 there). See whiteness_mask
+        # for threshold definition (min(R,G,B) >= 230 AND chroma <= 15).
+        if white_collapse:
+            from litho_color import whiteness_mask
+            _wmask = whiteness_mask(small, min_thresh=230, chroma_thresh=15,
+                                    sigma=2.0)
+            _gate = 1.0 - _wmask
+            dC = dC * _gate
+            dM = dM * _gate
+            dY = dY * _gate
+        # (c) LUMINANCE RECALIBRATION (iteration 49): when CMY is decoupled to
+        # chroma-only, the white layer must own ALL luminance. The anchored dTop
+        # field matches luminance only approximately, so dE exploded once CMY
+        # stopped fudging brightness (7.03 -> 11.27). Recalculate dTop so the
+        # white (neutral) layer hits the target L* exactly: s = Y_target/Y_cmy,
+        # dTop = -tdw*log10(s) - dW. Done BEFORE the honest dE so the reported
+        # dE reflects the corrected geometry. Uses the ORIGINAL (unpreprocessed)
+        # target luminance so the print matches what the user sees.
+        # Recalibration fully re-derives dTop, so the legacy spike pass would be
+        # wasted (and could only disturb the precise match) -> skip it then.
+        if recalib_luminance and chroma_decouple:
+            from litho_color import recalibrate_dtop_for_luminance
+            dTop = recalibrate_dtop_for_luminance(
+                flat_lab_orig, dC, dM, dY, dTop, td=td, dW=dW, top_max=top_max)
+        # (c2) legacy spike cleanup only when the new refinement is off AND
+        # recalibration is not taking over the dTop.
+        elif not surface_refine:
+            dTop = spike_surgery(dTop, t_sigma=1.5, iterations=2, top_max=top_max)
+        # (c3) Iteration 50: enforce a minimum dTop so the white layer ALWAYS
+        # caps the print surface (otherwise dark pixels can leave dTop ~ 0 and
+        # C/M/Y floats above, breaking the "W cap" expectation in slicers).
+        # Applied AFTER recalibration so it overrides the precise-luminance
+        # match in the rare pixels where the capless geometry would leak.
+        dTop = _dtop_min_clip(dTop, dtop_min=float(dtop_min),
+                              top_max=float(top_max))
         # (d) HONEST dE: forward-model the ACTUAL printed geometry (surgery
         # may shift dTop within the band) against the ORIGINAL image, not the
         # preprocessed target (adversarial review B3).
-        _fwd_dW = 0.2  # BAMBU gamut white base (z_lo)
+        _fwd_dW = dW  # gamut white base (0.2 mm for thin overlap / BAMBU)
         _tau = forward_stacked(dTop, dC, dM, dY, td=td, dW=_fwd_dW).reshape(-1, 3)
         _lab_p = xyz_to_lab(linear_to_xyz(
             np.clip(_tau, 0, 1))).reshape(-1, 3)
-        _orig_small = _resample_rgb(_p1_orig, small.shape[:2])
-        _lab_t = xyz_to_lab(linear_to_xyz(
-            srgb8_to_linear(_orig_small))).reshape(-1, 3)
+        _lab_t = flat_lab_orig
         _sub = np.linspace(0, _lab_t.shape[0] - 1,
                            min(20000, _lab_t.shape[0])).astype(int)
         _med = float(np.median(_dE2000_pair(_lab_t[_sub], _lab_p[_sub])))
         dE = np.full_like(dTop, _med)
+
+    # Apply edge-aware refinement to non-BAMBU modes as well (they do not use
+    # the P1 anchored-dTop path above).
+    if surface_refine and not _p1:
+        dTop = refine_dtop_surface(dTop, small, edge_alpha=edge_alpha,
+                                   gamma=refine_gamma, n_iter=refine_iter)
+
+    # Morphological open-close to merge tiny fragments / suppress residual
+    # spikes after refinement. detail_level drives the radius.
+    if morph_radius > 0:
+        from litho_color import morph_smooth
+        dTop = morph_smooth(dTop, radius=morph_radius, iterations=1)
 
     thickness = {"C": dC, "M": dM, "Y": dY, "top": dTop, "W": np.full_like(dTop, dW)}
 
@@ -369,6 +545,8 @@ def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.
             meshes[ch] = empty
         # dE is not meaningful for pure greyscale (no color matching).
         dE = np.zeros((gy_t, gx_t))
+        if flip_y:
+            meshes = {k: _flip_mesh_y(v, params.height_mm) for k, v in meshes.items()}
         return meshes, dE, gamut, None
 
     if mode == LithoMode.LAYERED:
@@ -385,6 +563,8 @@ def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.
         tTop = np.maximum(_resample(dTop, (gy_t, gx_t)), MIN_THICKNESS)
         meshes["top"] = heightfield_to_mesh(tTop, params_top, z_offset=top_z)
         reached = gamut["rgb8"][idx]
+        if flip_y:
+            meshes = {k: _flip_mesh_y(v, params.height_mm) for k, v in meshes.items()}
         return meshes, dE, gamut, reached
 
     if mode == LithoMode.STACKED:
@@ -435,6 +615,8 @@ def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.
         topf = bot + np.maximum(_resample(dTop, (gy_t, gx_t)), MIN_THICKNESS)
         meshes["top"] = heightfield_band_mesh(bot, topf, params_top)
         reached = gamut["rgb8"][idx]
+        if flip_y:
+            meshes = {k: _flip_mesh_y(v, params.height_mm) for k, v in meshes.items()}
         return meshes, dE, gamut, reached
 
     if mode == LithoMode.BAMBU:
@@ -509,6 +691,8 @@ def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.
         empty = (np.zeros((0, 3)), np.zeros((0, 3), dtype=np.int64))
         meshes["top"] = empty
         reached = gamut["rgb8"][idx]
+        if flip_y:
+            meshes = {k: _flip_mesh_y(v, params.height_mm) for k, v in meshes.items()}
         return meshes, dE, gamut, reached
 
     # INTERLEAVED and OVERLAP share the same same-base overlapping geometry:
@@ -551,4 +735,6 @@ def color_lithophane_engine(rgb_image, mode=LithoMode.LAYERED, order=ColorOrder.
     topf = bot + np.maximum(_resample(dTop, (gy_t, gx_t)), MIN_THICKNESS)
     meshes["top"] = heightfield_band_mesh(bot, topf, params_top)
     reached = gamut["rgb8"][idx]
+    if flip_y:
+        meshes = {k: _flip_mesh_y(v, params.height_mm) for k, v in meshes.items()}
     return meshes, dE, gamut, reached
