@@ -196,4 +196,56 @@ run_mode(np.asarray(Image.open(r'Z:\selfDIr\壁纸\【哲风壁纸】保险柜-�
 均较基线 7.15 偏高 2-3（chroma_decouple 路径固有取舍，深色区白层撞 top_max），
 但 W 始终封顶、CMY 形成干净平台、背景无混乱走线。
 
-**backlog**：(1) GUI 滑条接入；(2) 真实照片壁纸端到端；(3) `dtop_min` 在 CMY 撞 top_max 时回退为"按 tone"自适应；(4) `tag std-overlap-detail-v3`（当 dE < 8 时）。
+## 迭代 50c — 高光保护（2026-08-20）
+
+**用户反馈**：迭代 50 整体好转，但部分高光细节丢失（截图红框处硬币/圆形高光）。
+
+**根因**：`merge_min_size` 把小于阈值的小亮斑（硬币、反光）一并吞并到周围暗背景。
+
+**实施**：
+- `litho_color.merge_features` 增加 `highlight_protect`：局部亮度显著高于邻域的像素标记为高光，任何包含高光像素的连通块豁免 `min_size` 吸收。
+- 全栈接线：`litho_engine` + `export_v4.py --highlight-protect THRESHOLD`。
+- 测试：84/84 全绿（新增高光保护保留硬币测试）。
+
+**真实壁纸重导**：`prototype/_real_v4_highlight/`
+- `--chroma-decouple --recalib-luminance --dtop-min 0.10 --dtop-median-size 3 --merge-features 0.6 --merge-min-size 40 --highlight-protect 0.08 --cmy-merge-features 0.5 --cmy-merge-min-size 30 --cmy-smooth 0.8 --pixel-pitch-mm 0.20 --pitch-cmy-mm 0.30`
+- dE=9.12（与 v3_soft 9.23 持平），高光细节应保留。
+
+## 迭代 50d — dTop 高度量化（2026-08-20）
+
+**用户反馈**：v4_highlight 整体更平滑，但 W 层仍"不完整、多空隙路径"；第二次切片报 "G-code path goes beyond plate boundaries"。
+
+**根因**：
+- W 多孔：dTop 连续渐变，切片器追踪微等高线，形成大量细碎轮廓而非实心填充。
+- 越界：检查 `litho_top_white.stl` 顶点范围为 `[0,0,0.303] ~ [156,106,2.58]`，严格在画布内，故为 slicer/profile（skirt/brim margin）问题，非模型越界。
+
+**实施**：
+- 新增 `litho_color.quantize_dtop(dTop, step, top_max)`：`round(dTop/step)*step`，把连续高度梯田化。
+- 全栈接线：`litho_engine` + `export_v4.py --dtop-quantize-step MM`。
+- P1 路径在 honest dE 前量化；非 P1 在 morph 后量化。
+- 测试：85/85 全绿（新增量化 terrace 测试）。
+
+**真实壁纸重导**：`prototype/_real_v5_quantize/`
+- 在 v4_highlight 参数基础上加 `--dtop-quantize-step 0.12`
+- dE=9.23（与 v4 几乎持平）
+- 预计 W 层实心填充明显增加。
+
+## 迭代 50e — P1 morph + CMY 覆盖 margin（2026-08-20）
+
+**用户反馈**：v5_quantize 仍有锯齿尖刺（红框点未合成一条边）、碎平面多、W 未覆盖 CMY（正面 W 封顶 z 高度不足）。
+
+**根因**：
+- P1 路径之前未启用 `morph_smooth`，合并后仍留细小锯齿。
+- dTop 由亮度驱动，彩色区域可能出现 `dTop < max(dC,dM,dY)`，CMY 在 z 轴上高于白色封顶。
+
+**实施**：
+- P1 路径在 `merge_features` 后、CMY 重解前调用 `morph_smooth`（`detail_level` 控制半径）。
+- 新增 `dtop_cmy_cover_margin`：`dTop = max(dTop, max(dC,dM,dY) + margin)`，确保 W 顶层高于 CMY。
+- 全栈接线：`--detail-level` 与 `--dtop-cmy-cover-margin`。
+- 测试：86/86 全绿。
+
+**真实壁纸重导**：
+- `prototype/_real_v6_balanced/` — `detail-level 0.5, merge 0.6, min 50, quantize 0.12, cmy-cover 0.03`, dE=10.55
+- `prototype/_real_v6_solid/` — `detail-level 0.3, merge 0.7, min 80, quantize 0.20, cmy-cover 0.08`, dE=11.18
+
+**backlog**：(1) GUI 滑条接入；(2) 真实照片壁纸端到端；(3) `dtop_min` 在 CMY 撞 top_max 时回退为"按 tone"自适应；(4) `tag std-overlap-detail-v3`（当 dE < 8 时）；(5) 优化合并吸收的方向无偏性。

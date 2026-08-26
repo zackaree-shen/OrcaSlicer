@@ -46,9 +46,7 @@ def export_lithophane(
     outdir: str,
     *,
     printer: str = "Snapmaker U1",
-    width_mm: float = 156.0,
-    height_mm: float = 106.0,
-    long_edge_mm: float | None = None,
+    long_edge_mm: float = 144.0,
     pixel_pitch_mm: float = 0.15,
     pitch_top_mm: float | None = None,
     pitch_cmy_mm: float = 0.30,
@@ -59,47 +57,17 @@ def export_lithophane(
     y_strength: float = 1.0,
     w_strength: float = 1.0,
     dW: float = 0.20,
-    top_max: float = 1.6,
+    top_max: float = 1.2,
     layers_max: int = 6,
     layer_h: float = 0.12,
     sharpen: float = 2.0,
     contrast: float = 1.5,
     save_preview: bool = True,
     flip_y: bool = True,
-    white_collapse: bool = True,
-    merge_features: float = 0.0,
-    merge_min_size: int = 0,
-    chroma_decouple: bool = False,
-    cmy_smooth: float = 0.0,
-    recalib_luminance: bool = False,
-    # Iteration 50: aggressive cleanup knobs for "precision vs smoothness"
-    # balance on real-world images (cartoon, photo, text-on-busyness). All
-    # default 0 / off so v1 (std-overlap-detail-v2) reproduces byte-for-byte
-    # unless explicitly enabled.
-    dtop_median_size: int = 0,         # odd >=3 = median pre-filter on dTop
-    cmy_merge_features: float = 0.0,   # 0..1 plateau consolidation of CMY
-    cmy_merge_min_size: int = 0,       # tiny CMY blocks absorption
-    cmy_merge_chroma_tol: float = 8.0, # Lab (a*,b*) tol for CMY merge gate
-    cmy_median_size: int = 0,          # odd >=3 = median pre-filter on CMY
-    dtop_min: float = 0.0,             # min dTop (mm) — forces W always caps
 ) -> dict:
     """Run the OVERLAP lithophane engine and export 3MF + per-color STLs.
 
-    Sizing modes:
-      - Default (long_edge_mm=None): fixed physical canvas width_mm x height_mm
-        (156x106 mm to match the Bambu reference print), with CENTER-CROP of the
-        source image to the target aspect ratio. This reproduces Bambu's crop
-        behaviour so the same source image produces the same visible content.
-      - Legacy (long_edge_mm=<value>): scale the source to make its long edge
-        equal long_edge_mm while preserving aspect (no crop). Use this when you
-        want the full source image at the given physical size.
-
-    top_max default = 1.6 mm: combined with dW=0.20 + CMY band 6*0.12=0.72 mm,
-    total print thickness is ~2.52 mm — matches the Bambu reference (2.5 mm).
-
-    white_collapse (default True): in near-white source regions, zero out the
-    C/M/Y layers so the top white relief carries the print alone. Matches Bambu
-    behaviour and eliminates CMY speckle in white areas.
+    Returns the engine output dict for inspection.
     """
     os.makedirs(outdir, exist_ok=True)
 
@@ -107,31 +75,10 @@ def export_lithophane(
         rgb = np.asarray(im.convert("RGB"), dtype=np.uint8)
     print(f"Input: {image_path}  ({rgb.shape[1]}x{rgb.shape[0]} px)")
 
-    if long_edge_mm is not None:
-        # Legacy: aspect-preserving scale to the long edge.
-        scale = long_edge_mm / max(rgb.shape[1], rgb.shape[0])
-        phys_w = rgb.shape[1] * scale
-        phys_h = rgb.shape[0] * scale
-    else:
-        # Fixed canvas with center-crop to the target aspect (Bambu-like).
-        phys_w, phys_h = width_mm, height_mm
-        tgt_aspect = width_mm / height_mm
-        h_px, w_px = rgb.shape[:2]
-        src_aspect = w_px / h_px
-        if src_aspect > tgt_aspect + 1e-6:
-            new_w = int(round(h_px * tgt_aspect))
-            x0 = (w_px - new_w) // 2
-            rgb = rgb[:, x0:x0 + new_w]
-            print(f"Center-crop: {w_px}x{h_px} -> {new_w}x{h_px} px "
-                  f"(aspect {tgt_aspect:.3f})")
-        elif src_aspect < tgt_aspect - 1e-6:
-            new_h = int(round(w_px / tgt_aspect))
-            y0 = (h_px - new_h) // 2
-            rgb = rgb[y0:y0 + new_h]
-            print(f"Center-crop: {w_px}x{h_px} -> {w_px}x{new_h} px "
-                  f"(aspect {tgt_aspect:.3f})")
+    scale = long_edge_mm / max(rgb.shape[1], rgb.shape[0])
     params = LithophaneParams(
-        width_mm=phys_w, height_mm=phys_h,
+        width_mm=rgb.shape[1] * scale,
+        height_mm=rgb.shape[0] * scale,
         pixel_pitch_mm=pixel_pitch_mm,
     )
     pitch_top = pitch_top_mm if pitch_top_mm is not None else 0.15
@@ -160,18 +107,6 @@ def export_lithophane(
         y_strength=y_strength,
         w_strength=w_strength,
         flip_y=flip_y,
-        white_collapse=white_collapse,
-        merge_features=merge_features,
-        merge_min_size=merge_min_size,
-        chroma_decouple=chroma_decouple,
-        cmy_smooth=cmy_smooth,
-        recalib_luminance=recalib_luminance,
-        dtop_median_size=dtop_median_size,
-        cmy_merge_features=cmy_merge_features,
-        cmy_merge_min_size=cmy_merge_min_size,
-        cmy_merge_chroma_tol=cmy_merge_chroma_tol,
-        cmy_median_size=cmy_median_size,
-        dtop_min=dtop_min,
     )
 
     parts, offsets, names, extruders = assemble_lithophane_parts(meshes)
@@ -222,14 +157,8 @@ def main():
     parser.add_argument("image", help="Input image path")
     parser.add_argument("-o", "--outdir", required=True, help="Output directory")
     parser.add_argument("--printer", default="Snapmaker U1", help="Printer model")
-    parser.add_argument("--width-mm", type=float, default=156.0,
-                        help="Physical width in mm (default: 156, matches Bambu)")
-    parser.add_argument("--height-mm", type=float, default=106.0,
-                        help="Physical height in mm (default: 106, matches Bambu)")
-    parser.add_argument("--long-edge-mm", type=float, default=None,
-                        help="Legacy: physical long edge size in mm. If set, "
-                             "overrides width/height and uses aspect-preserving "
-                             "scale (no crop). Default: None (use width/height)")
+    parser.add_argument("--long-edge-mm", type=float, default=144.0,
+                        help="Physical long edge size in mm (default: 144)")
     parser.add_argument("--pixel-pitch-mm", type=float, default=0.15,
                         help="Thickness grid pitch in mm; smaller = more detail (default: 0.15)")
     parser.add_argument("--pitch-top-mm", type=float, default=None,
@@ -250,9 +179,8 @@ def main():
                         help=">1 makes white act denser (default: 1.0)")
     parser.add_argument("--dW", type=float, default=0.20,
                         help="White base thickness in mm (default: 0.20)")
-    parser.add_argument("--top-max", type=float, default=1.6,
-                        help="Max top relief thickness in mm (default: 1.6, "
-                             "yields ~2.5mm total to match Bambu)")
+    parser.add_argument("--top-max", type=float, default=1.2,
+                        help="Max top relief thickness in mm (default: 1.2)")
     parser.add_argument("--layers-max", type=int, default=6,
                         help="Number of color layers per channel (default: 6)")
     parser.add_argument("--layer-h", type=float, default=0.12,
@@ -265,83 +193,12 @@ def main():
                         help="Do not save preview_dTop.png")
     parser.add_argument("--legacy-orientation", action="store_true",
                         help="Keep legacy Y orientation (image top -> -Y)")
-    parser.add_argument("--white-collapse", dest="white_collapse",
-                        action="store_true", default=True,
-                        help="Zero CMY in white regions (default: on, matches Bambu)")
-    parser.add_argument("--no-white-collapse", dest="white_collapse",
-                        action="store_false",
-                        help="Disable white-collapse; keep full CMY everywhere")
-    parser.add_argument("--merge-features", dest="merge_features", type=float,
-                        default=0.0,
-                        help="White-layer feature-merge strength 0..1 (default 0 = off). "
-                             "Consolidates the relief into clean plateaus; 0.4-0.7 recommended.")
-    parser.add_argument("--merge-min-size", dest="merge_min_size", type=int,
-                        default=0,
-                        help="Absorb connected components smaller than this many "
-                             "pixels into the largest 4-neighbouring component. "
-                             "Only used with --merge-features > 0. Use to clean up "
-                             "anti-aliased / JPEG noise specks that survived the "
-                             "luminance+gradient gate. 0 disables (v1 behaviour). "
-                             "16-30 is a sane range at 0.15-0.30 mm pitch.")
-    parser.add_argument("--chroma-decouple", dest="chroma_decouple",
-                        action="store_true", default=False,
-                        help="CMY carries ONLY hue/saturation; the white relief "
-                             "carries ALL luminance (K-style shading). Makes CMY "
-                             "safe to smooth. Off by default (baseline behaviour).")
-    parser.add_argument("--cmy-smooth", dest="cmy_smooth", type=float,
-                        default=0.0,
-                        help="Gaussian sigma (px) applied to C/M/Y colour fields "
-                             "after solving. Only meaningful with --chroma-decouple "
-                             "(CMY is then pure colour, so blurring cannot hurt "
-                             "brightness/detail). 0.5-1.0 smooths colour backdrops.")
-    parser.add_argument("--recalib-luminance", dest="recalib_luminance",
-                        action="store_true", default=False,
-                        help="With --chroma-decouple: re-derive dTop so the neutral "
-                             "white layer hits the target L* exactly (cures the dE "
-                             "explosion caused by decoupling). No-op without "
-                             "--chroma-decouple.")
-    # Iteration 50: precision-vs-smoothness balance knobs.
-    parser.add_argument("--dtop-median-size", dest="dtop_median_size",
-                        type=int, default=0,
-                        help="Median filter window (px, odd >=3) applied to dTop "
-                             "BEFORE feature merge. Edge-preserving; kills sub-"
-                             "min_size specks AND surfaces real plateaus for the "
-                             "lum_tol gate to latch onto. 3-5 recommended at 0.18 "
-                             "mm pitch; 0 disables (v1 behaviour).")
-    parser.add_argument("--cmy-merge-features", dest="cmy_merge_features",
-                        type=float, default=0.0,
-                        help="CMY plateau consolidation strength 0..1. Distinct "
-                             "from --cmy-smooth (gaussian): this is edge-preserving "
-                             "and forms CLEAN PLATEAUS — kills the 'messy background "
-                             "walk' in slicer view. 0.5-0.8 typical. 0 disables.")
-    parser.add_argument("--cmy-merge-min-size", dest="cmy_merge_min_size",
-                        type=int, default=0,
-                        help="Absorb CMY connected components smaller than this "
-                             "many pixels into the largest 4-neighbouring "
-                             "component. 16-30 recommended. 0 disables.")
-    parser.add_argument("--cmy-merge-chroma-tol", dest="cmy_merge_chroma_tol",
-                        type=float, default=8.0,
-                        help="CIE Lab (a*,b*) tolerance for CMY merge gate "
-                             "(default 8 = barely-perceptible chroma step).")
-    parser.add_argument("--cmy-median-size", dest="cmy_median_size",
-                        type=int, default=0,
-                        help="Median filter window (px, odd >=3) applied to dC/dM/"
-                             "dY before the CMY merge gate. 3-5 recommended; 0 "
-                             "disables.")
-    parser.add_argument("--dtop-min", dest="dtop_min", type=float, default=0.0,
-                        help="Force dTop >= this thickness (mm) everywhere, so "
-                             "the white relief ALWAYS caps the print. 0 disables "
-                             "(v1 behaviour). 0.08-0.15 recommended with "
-                             "--chroma-decouple to cure 'W cap missing' on dark "
-                             "scenes.")
     args = parser.parse_args()
 
     export_lithophane(
         image_path=args.image,
         outdir=args.outdir,
         printer=args.printer,
-        width_mm=args.width_mm,
-        height_mm=args.height_mm,
         long_edge_mm=args.long_edge_mm,
         pixel_pitch_mm=args.pixel_pitch_mm,
         pitch_top_mm=args.pitch_top_mm,
@@ -360,18 +217,6 @@ def main():
         contrast=args.contrast,
         save_preview=not args.no_preview,
         flip_y=not args.legacy_orientation,
-        white_collapse=args.white_collapse,
-        merge_features=args.merge_features,
-        merge_min_size=args.merge_min_size,
-        chroma_decouple=args.chroma_decouple,
-        cmy_smooth=args.cmy_smooth,
-        recalib_luminance=args.recalib_luminance,
-        dtop_median_size=args.dtop_median_size,
-        cmy_merge_features=args.cmy_merge_features,
-        cmy_merge_min_size=args.cmy_merge_min_size,
-        cmy_merge_chroma_tol=args.cmy_merge_chroma_tol,
-        cmy_median_size=args.cmy_median_size,
-        dtop_min=args.dtop_min,
     )
 
 

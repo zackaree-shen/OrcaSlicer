@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lithophane Studio</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- ===== Sidebar ===== -->
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="logo">◆</div>
+      <div>
+        <h1>Lithophane</h1>
+        <span>Studio</span>
+      </div>
+    </div>
+
+    <nav class="steps">
+      <button class="step" data-step="1" onclick="window.pickImage()">
+        <span class="step-num">1</span> 选择图片
+      </button>
+      <button class="step" data-step="2" onclick="window.build()" id="btn-build" disabled>
+        <span class="step-num">2</span> 构建模型
+      </button>
+      <button class="step" data-step="3" onclick="window.exportAll()" id="btn-export" disabled>
+        <span class="step-num">3</span> 导出 3MF + STL
+      </button>
+      <button class="step" data-step="4" onclick="window.reverseImport()" id="btn-reverse" disabled>
+        <span class="step-num">4</span> 反向导入对比
+      </button>
+    </nav>
+
+    <div class="params">
+      <div class="param-group">
+        <label>算法</label>
+        <select id="mode" onchange="window.onModeChange()">
+          <option value="greyscale">灰度浮雕</option>
+          <option value="layered" selected>分层 (LAYERED)</option>
+          <option value="interleaved">交错 (INTERLEAVED)</option>
+          <option value="stacked">叠柱 (STACKED)</option>
+          <option value="overlap">重叠 (OVERLAP)</option>
+          <option value="bambu">Bambu 复刻 (BAMBU)</option>
+        </select>
+      </div>
+      <div class="param-group">
+        <label>颜色顺序</label>
+        <select id="order" onchange="window.onParamChange()">
+          <option value="CMY" selected>CMY</option>
+          <option value="CYM">CYM</option>
+          <option value="MCY">MCY</option>
+          <option value="MYC">MYC</option>
+          <option value="YMC">YMC</option>
+          <option value="YCM">YCM</option>
+          <option value="MIXED">MIXED</option>
+        </select>
+      </div>
+
+      <div class="param-group">
+        <label>尺寸 (mm)</label>
+        <div class="row2">
+          <input type="number" id="width" value="144" min="10" max="3000">
+          <span class="x">×</span>
+          <input type="number" id="height" value="108" min="10" max="3000">
+        </div>
+      </div>
+      <div class="param-group">
+        <label>层高 (mm)</label>
+        <input type="number" id="layerh" value="0.2" step="0.02" min="0.02" max="0.5">
+      </div>
+      <div class="param-group">
+        <label>颜色层数上限</label>
+        <input type="number" id="layers" value="8" min="1" max="30">
+      </div>
+      <div class="param-group">
+        <label>精度 (mm/像素)</label>
+        <input type="number" id="pitch" value="0.3" step="0.05" min="0.02" max="2">
+      </div>
+      <div class="param-group">
+        <label>白底厚度 (mm)</label>
+        <input type="number" id="dwhite" value="0.80" step="0.05" min="0" max="3">
+      </div>
+      <div class="param-group">
+        <label>最大厚度 (mm)</label>
+        <input type="number" id="maxthick" value="2.80" step="0.1" min="0.5" max="4">
+      </div>
+      <div class="param-group">
+        <label>雕刻方向</label>
+        <select id="carve">
+          <option value="concave" selected>凹刻（阴刻，顶面平）</option>
+          <option value="convex">凸刻（阳刻，顶面起）</option>
+        </select>
+      </div>
+      <div class="param-group">
+        <label>锐化强度</label>
+        <input type="number" id="sharpen" value="2.00" step="0.1" min="0" max="2">
+      </div>
+      <div class="param-group">
+        <label>对比度增强</label>
+        <input type="number" id="contrast" value="1.50" step="0.05" min="1" max="2">
+      </div>
+      <div class="param-group" id="tonemap-group" style="display:none">
+        <label>自适应厚度（Bambu 模式）</label>
+        <select id="tonemap">
+          <option value="1" selected>均衡映射 — 层次最大化（推荐）</option>
+          <option value="0">关闭 — 逐像素色卡求解</option>
+        </select>
+      </div>
+
+      <div class="param-group">
+        <label>TD 选择性（主通道）</label>
+        <div class="td-row"><span class="td-c">C</span><input type="number" id="tdc" value="0.5" step="0.05" min="0.05" max="2"></div>
+        <div class="td-row"><span class="td-m">M</span><input type="number" id="tdm" value="0.5" step="0.05" min="0.05" max="2"></div>
+        <div class="td-row"><span class="td-y">Y</span><input type="number" id="tdy" value="0.5" step="0.05" min="0.05" max="2"></div>
+      </div>
+
+      <div class="param-group">
+        <label>导出格式</label>
+        <select id="fmt">
+          <option value="3MF">3MF（组合体）</option>
+          <option value="STL">STL（5 个文件）</option>
+          <option value="BOTH">3MF + STL</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="status" id="status">就绪</div>
+  </aside>
+
+  <!-- ===== Main ===== -->
+  <main class="main">
+    <div class="toolbar">
+      <div class="tabs">
+        <button class="tab active" data-tab="compare">对比预览</button>
+        <button class="tab" data-tab="view3d">3D 视图</button>
+      </div>
+      <div class="stats" id="stats"></div>
+    </div>
+
+    <!-- Compare tab -->
+    <section class="tab-content active" id="tab-compare">
+      <div class="compare-grid">
+        <div class="card">
+          <div class="card-title">原图</div>
+          <div class="card-body" id="orig-preview">
+            <div class="placeholder">未选择图片<br><small>点击「选择图片」</small></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-title">打印模拟 (WYSIWYG)</div>
+          <div class="card-body" id="reached-preview">
+            <div class="placeholder">构建后显示</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 3D tab -->
+    <section class="tab-content" id="tab-view3d">
+      <div class="card card-3d">
+        <div class="card-title">
+          3D 视图
+          <span class="hint">左键旋转 · 滚轮缩放 · 右键平移</span>
+        </div>
+        <div class="layer-legend">
+          <label class="lg lg-w"><input type="checkbox" checked onchange="toggleLayer('W', this.checked)"> W 底</label>
+          <label class="lg lg-c"><input type="checkbox" checked onchange="toggleLayer('C', this.checked)"> C 青</label>
+          <label class="lg lg-m"><input type="checkbox" checked onchange="toggleLayer('M', this.checked)"> M 品</label>
+          <label class="lg lg-y"><input type="checkbox" checked onchange="toggleLayer('Y', this.checked)"> Y 黄</label>
+          <label class="lg lg-t"><input type="checkbox" checked onchange="toggleLayer('top', this.checked)"> top 白</label>
+        </div>
+        <div class="card-body card-3d-body">
+          <div id="three-container"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="three.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
