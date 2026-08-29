@@ -66,6 +66,14 @@ struct FillParams
     // Don't adjust spacing to fill the space evenly.
     bool        dont_adjust 	{ true };
 
+    // Snapmaker: for external bridges with density >= 100%, anchor the first/last
+    // line centres at the bridge surface's inner-contour edges instead of the
+    // object-wide pattern grid, whose phase against the surface (and the adjacent
+    // walls) is arbitrary and changes with density. Default false; the only call
+    // site that sets it is Layer::make_fills, so every other fill keeps the
+    // vanilla behaviour by construction.
+    bool        bridge_edge_anchor { false };
+
     // Monotonic infill - strictly left to right for better surface quality of top infills.
     bool 		monotonic		{ false };
 
