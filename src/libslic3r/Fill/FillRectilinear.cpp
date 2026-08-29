@@ -2764,7 +2764,9 @@ bool FillRectilinear::fill_surface_by_lines(const Surface *surface, const FillPa
         rotate_vector.first += float(M_PI/2.);
     rotate_vector.first += angleBase;
 
-    assert(params.density > 0.0001f && params.density <= 1.f);
+    // Snapmaker: bridge_edge_anchor bridges run density up to 1.25 (bridge_density
+    // is capped at 120% by the config); every other caller keeps the stricter bound.
+    assert(params.density > 0.0001f && (params.bridge_edge_anchor ? params.density <= 1.25f : params.density <= 1.f));
     coord_t line_spacing = coord_t(scale_(this->spacing) / params.density);
 
     // On the polygons of poly_with_offset, the infill lines will be connected.
@@ -2785,7 +2787,55 @@ bool FillRectilinear::fill_surface_by_lines(const Surface *surface, const FillPa
     BoundingBox bounding_box     = this->has_consistent_pattern() ? this->extended_object_bounding_box() : bounding_box_src;
 
     // define flow spacing according to requested density
-    if (params.full_infill() && !params.dont_adjust) {
+    if (params.bridge_edge_anchor) {
+        // Snapmaker: external bridge with density >= 100% (guaranteed by the
+        // single set-site in Layer::make_fills). Anchor the first/last line
+        // centres delta inside the inner contour (the line admission region) and
+        // floor-fit the spacing on the usable width, so both end centres are
+        // admitted and their material covers the surface edge. This replaces the
+        // object-wide pattern grid, whose phase against the bridge surface and
+        // the adjacent walls is arbitrary and re-rolls with every density change.
+        // The fitted spacing is NOT written back to this->spacing: the configured
+        // bridge line width survives, so densities > 100% overlap lines instead
+        // of extruding wider ones.
+        BoundingBox bounding_box_inner = poly_with_offset.bounding_box_inner();
+        // Rebase the line grid onto the inner contour extent (the dispatch bbox
+        // above is the src/extended object bbox, which is wider than the
+        // admission region on both sides).
+        bounding_box = bounding_box_inner;
+        const coord_t width_inner      = bounding_box_inner.size().x();
+        // Keep the end centres this far inside the inner contour so the admission
+        // test passes even at the contour extremes (measured margin 0.02mm).
+        const coord_t delta  = coord_t(scale_(0.02));
+        const coord_t usable = width_inner - 2 * delta;
+        if (usable < line_spacing) {
+            // Surface narrower than one requested spacing: a single line centred
+            // on the surface (two anchored lines would nearly coincide).
+            const coord_t half   = (line_spacing + coord_t(SCALED_EPSILON)) / 2;
+            const coord_t middle = (bounding_box_inner.min.x() + bounding_box_inner.max.x()) / 2;
+            bounding_box.min.x() = middle - half;
+            bounding_box.max.x() = bounding_box.min.x() + line_spacing - 1;
+        } else {
+            // floor-fit the interval count, mirroring _adjust_solid_spacing
+            coord_t n = usable / line_spacing; // >= 1, exact division below restores both edges
+            line_spacing = usable / n;
+            // The bridge line width is not written back, so cap the fitted spacing
+            // at the flow width: neighbouring lines must never sit farther apart
+            // than the line is wide (no air gaps between bridge lines).
+            const coord_t ls_cap = coord_t(scale_(params.flow.width()));
+            if (line_spacing > ls_cap) {
+                n = (usable + ls_cap - 1) / ls_cap; // ceil
+                line_spacing = usable / n;
+            }
+            // x0 = bounding_box.min.x() + half (full_infill below, with the final
+            // line_spacing), so offset the inner bbox to land the first centre on
+            // inner_min+delta; n intervals of usable width then put the last
+            // centre on inner_max-delta.
+            const coord_t half = (line_spacing + coord_t(SCALED_EPSILON)) / 2;
+            bounding_box.min.x() += delta - half;
+            bounding_box.max.x() -= delta - half;
+        }
+    } else if (params.full_infill() && !params.dont_adjust) {
         line_spacing = this->_adjust_solid_spacing(bounding_box_src.size().x(), line_spacing);
         this->spacing = unscale<double>(line_spacing);
     } else {
