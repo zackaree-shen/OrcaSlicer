@@ -127,18 +127,22 @@ _EXIT_TABLE = {
     -6:           ("failed",  "Data file error", "Data/resource file error. Check --datadir."),
     -7:           ("failed",  "Invalid printer technology", "Printer technology not supported."),
     -8:           ("failed",  "Unsupported operation", "The requested operation is not supported."),
-    18:           ("failed",  "Invalid values in 3MF", "Profile missing or contains illegal values."),
+    -9:           ("failed",  "Copy objects error", "Object copy operation failed."),
+    -10:          ("failed",  "Scale-to-fit error", "Auto-scale failed."),
+    -13:          ("failed",  "Export 3MF error", "3MF export error."),
+    -14:          ("failed",  "Out of memory", "Insufficient memory. Simplify the model."),
+    -18:          ("failed",  "Invalid values in 3MF", "Profile missing or contains illegal values."),
+    -23:          ("failed",  "Modified printer params", "Printer preset was modified in the 3MF."),
     -24:          ("failed",  "File version not supported", "3MF version too high. Add --allow-newer-file."),
-    24:           ("failed",  "File version not supported", "3MF version too high. Add --allow-newer-file."),
-    50:           ("failed",  "No suitable objects", "No objects within print volume."),
-    -51:          ("failed",  "Validation error", "Likely relative extruder mode. Add --use-relative-e-distances=0."),
-    51:           ("failed",  "Validation error", "Likely relative extruder mode. Add --use-relative-e-distances=0."),
-    52:           ("failed",  "Object partly inside error", "Object partially outside print volume."),
-    58:           ("timeout", "Slice time exceeded", "Internal per-plate timeout. Increase --mstpp."),
-    59:           ("failed",  "Triangle count exceeded", "Increase --mtcpp."),
-    101:          ("failed",  "G-code conflict", "G-code output path conflict."),
-    -100:         ("failed",  "Slicing error", "Internal slicer error during processing."),
-    -101:         ("failed",  "G-code conflict", "G-code output path conflict."),
+    -50:          ("failed",  "No suitable objects (-50)", "One plate is empty or has no object fully inside the print volume. The CLI stops at the first empty plate. Use per-plate mode to skip empty plates."),
+    -51:          ("failed",  "Validation error (-51)", "Incorrect slicing parameters. May need --use-relative-e-distances=0."),
+    -52:          ("failed",  "Objects partly inside (-52)", "Some objects are over the bed boundary."),
+    -58:          ("timeout", "Slice time exceeded (-58)", "A plate's slicing time exceeded the limit. Simplify the model or increase layer height."),
+    -59:          ("failed",  "Triangle count exceeded (-59)", "A plate's triangle count exceeds the limit. Simplify the model."),
+    -60:          ("failed",  "No suitable objects after skip (-60)", "No printable objects remain after skipping."),
+    -100:         ("failed",  "Slicing error (-100)", "Internal slicer error during processing."),
+    -101:         ("failed",  "G-code conflict (-101)", "G-code output path conflict."),
+    -150:         ("failed",  "Spiral mode invalid params (-150)", "Some params conflict with Spiral Vase mode."),
 }
 
 def _normalize_code(code):
@@ -159,13 +163,15 @@ def analyze_exit_code(code):
 
 _LOG_PATTERNS = [
     (re.compile(r"negative spacing", re.I),       "Flow::spacing() negative spacing", "Geometry degeneracy in the model."),
-    (re.compile(r"Nothing to be sliced", re.I),   "Nothing to be sliced",             "Plate shape or object placement issue."),
+    (re.compile(r"Nothing to be sliced", re.I),   "Plate is empty (no objects in volume)", "A plate has no object fully inside the print volume. Tool will auto-retry each plate individually."),
+    (re.compile(r"no object.*fully inside", re.I),"No object inside print volume",    "Objects are outside the bed boundary."),
     (re.compile(r"Wipe tower.*failed", re.I),     "Wipe tower generation failed",     "Multi-material wipe tower geometry error."),
     (re.compile(r"filament_is_support", re.I),    "filament_is_support mismatch",     "Filament support count mismatch in 3MF config."),
     (re.compile(r"relative.*extrud", re.I),       "Relative extruder error",          "Add --use-relative-e-distances=0."),
     (re.compile(r"triangle.*exceed", re.I),       "Triangle count exceeded",          "Increase --mtcpp."),
     (re.compile(r"version.*not.*support", re.I),  "File version unsupported",         "Add --allow-newer-file."),
     (re.compile(r"SlicingError", re.I),           "Slicing engine error",             "Internal slicer error during processing."),
+    (re.compile(r"collision", re.I),              "Object collision detected",        "Objects overlap in print-by-object or layer mode."),
 ]
 
 def analyze_log(log_text):
@@ -174,6 +180,90 @@ def analyze_log(log_text):
         if pattern.search(log_text):
             hits.append({"keyword": desc, "suggestion": suggestion})
     return hits
+
+
+def _extract_plate_count(log_lines):
+    """Extract total plate count from CLI progress output (plate_count=N)."""
+    for line in log_lines:
+        m = re.search(r"plate_count\s*=?\s*(\d+)", line)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def _count_plates_in_3mf(file_path):
+    """Count plates in a 3MF by inspecting its metadata XML inside the zip."""
+    try:
+        import zipfile
+        with zipfile.ZipFile(file_path, "r") as zf:
+            for name in zf.namelist():
+                if name.endswith("slice_info.config") or name.endswith("model_settings.config"):
+                    content = zf.read(name).decode("utf-8", errors="replace")
+                    plates = re.findall(r"<plate[\s>]", content)
+                    if plates:
+                        return len(plates)
+    except Exception:
+        pass
+    return None
+
+
+def _do_per_plate_fallback(result, config, out_dir, plate_count):
+    """Retry slicing each plate individually when --slice 0 fails on an empty plate.
+
+    The CLI exits immediately at the first plate with no suitable objects (-50),
+    so subsequent valid plates are never sliced. This iterates plates 1..N
+    individually, collecting all G-codes and skipping empty ones.
+    """
+    result.log_lines.append("")
+    result.log_lines.append(f"[TOOL] Per-plate fallback: slicing {plate_count} plates individually...")
+    result.log_lines.append("")
+    success_plates, skipped_plates, failed_plates = [], [], []
+    for plate_idx in range(1, plate_count + 1):
+        if session._stop_flag.is_set():
+            result.log_lines.append(f"[TOOL] Stopped during per-plate slicing at plate {plate_idx}.")
+            break
+        plate_config = dict(config)
+        plate_config["slice_mode"] = plate_idx
+        result.log_lines.append(f"--- Plate {plate_idx}/{plate_count} ---")
+        result.stage_label = f"逐盘切片 {plate_idx}/{plate_count}"
+        result.progress_pct = int(5 + 85 * (plate_idx - 1) / max(plate_count, 1))
+        broker.publish({"type": "slice_progress", "file": result.file_name,
+                        "pct": result.progress_pct, "stage": result.stage_label})
+        _do_slice_subprocess(result, config=plate_config, out_dir=out_dir)
+        signed = _normalize_code(result.exit_code)[0]
+        if signed == 0:
+            success_plates.append(plate_idx)
+        elif signed in (-50, -60):
+            skipped_plates.append(plate_idx)
+            result.log_lines.append(f"[TOOL] Plate {plate_idx} skipped (empty/no suitable objects).")
+        else:
+            failed_plates.append(plate_idx)
+            result.log_lines.append(f"[TOOL] Plate {plate_idx} failed (exit {result.exit_code}).")
+    result.log_lines.append("")
+    result.log_lines.append(f"[TOOL] Per-plate summary: {len(success_plates)} sliced, "
+                            f"{len(skipped_plates)} skipped, {len(failed_plates)} failed.")
+    if skipped_plates:
+        result.log_lines.append(f"[TOOL] Skipped plates: {skipped_plates}")
+    if failed_plates:
+        result.log_lines.append(f"[TOOL] Failed plates: {failed_plates}")
+    if success_plates:
+        result.exit_code = 0
+        result.status = "success"
+        result.category = "success"
+        note = ""
+        if skipped_plates:
+            note += f" (跳过空盘: {skipped_plates})"
+        if failed_plates:
+            note += f" (失败盘: {failed_plates})"
+        result.label = f"成功 ({len(success_plates)}/{plate_count} 盘){note}"
+        result.suggestion = None
+        result.progress_pct = 100
+        result.stage_label = "完成"
+    else:
+        result.status = "failed"
+        result.label = f"所有盘均失败或为空"
+        result.stage_label = "失败"
+    return bool(success_plates)
 
 
 def extract_log_summary(log_lines, status="unknown"):
@@ -192,6 +282,8 @@ def extract_log_summary(log_lines, status="unknown"):
         "Will start to read model", "Successfully",
         "gcode file", "sliced", "slice finished",
         "total cost", "estimated", "used time",
+        "plate", "per-plate", "skipped", "collision",
+        "nothing to be sliced", "no suitable", "return -",
     ]
     seen = set()
     for line in log_lines:
@@ -652,16 +744,34 @@ def run_one_slice(result, config, output_base):
     result.started_at = datetime.now().isoformat()
     result.status = "running"
     result.progress_pct = 0
-    result.stage_label = "启动中"
     result._start_ts = time.time()
     tool_log(f"START slicing: {result.file_path}")
     broker.publish({"type": "slice_started", "file": result.file_name})
 
+    engine = config.get("slice_engine", "cli")
+    if engine == "gui":
+        _do_gui_slice(result, config, out_dir)
+        _post_slice(result, config, out_dir)
+        return
+
+    result.stage_label = "启动中"
     # First attempt
     _do_slice_subprocess(result, config, out_dir)
 
+    # Per-plate fallback: if --slice 0 fails because a plate is empty (-50/-60),
+    # retry each plate individually so valid plates still get sliced.
+    signed_exit = _normalize_code(result.exit_code)[0]
+    if (config.get("slice_mode", 0) == 0 and signed_exit in (-50, -60)
+            and engine != "gui" and not session._stop_flag.is_set()):
+        plate_count = _extract_plate_count(result.log_lines) or _count_plates_in_3mf(result.file_path)
+        if plate_count and plate_count > 1:
+            tool_log(f"PER-PLATE FALLBACK: {result.file_name} ({plate_count} plates)")
+            _do_per_plate_fallback(result, config, out_dir, plate_count)
+            _post_slice(result, config, out_dir)
+            return
+
     # Auto-retry: if failed with relative extruder error, retry with --use-relative-e-distances=0
-    if result.exit_code and result.exit_code != 0:
+    if result.exit_code and signed_exit not in (0,):
         full_log = "\n".join(result.log_lines)
         if "relative" in full_log.lower() and "extrud" in full_log.lower():
             tool_log(f"RETRY {result.file_name} with --use-relative-e-distances=0")
@@ -670,27 +780,147 @@ def run_one_slice(result, config, output_base):
             result.log_lines.append("")
             result.progress_pct = 0
             result.stage_label = "重试中"
-            # Clone config and force the flag
             retry_config = dict(config)
             retry_config["no_relative_e"] = True
-            # Reset result state
             result.log_lines = result.log_lines[:2]  # keep command header
             _do_slice_subprocess(result, retry_config, out_dir)
             if result.exit_code == 0:
                 result.label = "Success (auto-retry with --use-relative-e-distances=0)"
 
     # Detect gcode files
+    _post_slice(result, config, out_dir)
+
+
+def _post_slice(result, config, out_dir):
+    """Post-slice: detect gcode files, analyze logs, publish results."""
+    full_log = "\n".join(result.log_lines)
     gcodes = list(Path(out_dir).glob("*.gcode"))
     result.gcode_files = [str(f.name) for f in gcodes]
     result.gcode_total_size = sum(f.stat().st_size for f in gcodes)
-
-    full_log = "\n".join(result.log_lines)
     result.error_keywords = analyze_log(full_log)
     result.log_summary = extract_log_summary(result.log_lines, result.status)
     result.progress_pct = 100 if result.status == "success" else result.progress_pct
     result.stage_label = "完成" if result.status == "success" else result.stage_label
     result.finished_at = datetime.now().isoformat()
     broker.publish({"type": "slice_done", "file": result.file_name, "result": result.to_dict()})
+
+
+def _do_gui_slice(result, config, out_dir):
+    """Launch the full OrcaSlicer GUI with the file loaded.
+    The user manually slices in the GUI and closes the app.
+    We detect success/failure by checking for G-code output after the process exits.
+    """
+    cli = _resolve(config["cli_path"])
+    cli_dir = str(Path(cli).parent)
+    env = os.environ.copy()
+    env["PATH"] = cli_dir + os.pathsep + env.get("PATH", "")
+    timeout = int(config.get("timeout", 3600))  # GUI mode: default 1 hour
+
+    # Count gcode files before launch (to detect new ones)
+    gcodes_before = set(f.name for f in Path(out_dir).glob("*.gcode"))
+
+    result.log_lines.append("[GUI MODE] Launching OrcaSlicer GUI with file:")
+    result.log_lines.append("  " + result.file_path)
+    result.log_lines.append("[GUI MODE] Please slice the model in the GUI, then close OrcaSlicer.")
+    result.log_lines.append("[GUI MODE] Output directory: " + out_dir)
+    result.log_lines.append("")
+    result.stage_label = "GUI 模式 - 请手动切片"
+    result.progress_pct = 5
+    broker.publish({"type": "slice_progress", "file": result.file_name,
+                   "pct": 5, "stage": result.stage_label})
+
+    cmd = [cli]
+    # Pass datadir so the GUI finds resources
+    cmd += ["--datadir", _resolve(config["datadir"])]
+    if config.get("allow_newer_file", True):
+        cmd += ["--allow-newer-file"]
+    cmd += [result.file_path]
+
+    try:
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env,
+            cwd=cli_dir,
+        )
+        with session._proc_lock:
+            session._current_proc = proc
+
+        # Stream output in background while waiting
+        _line_q = queue.Queue()
+        def _reader():
+            for raw in iter(proc.stdout.readline, b""):
+                _line_q.put(raw)
+            _line_q.put(None)
+        _reader_t = threading.Thread(target=_reader, daemon=True)
+        _reader_t.start()
+
+        deadline = time.time() + timeout
+        while True:
+            try:
+                raw = _line_q.get(timeout=0.5)
+            except queue.Empty:
+                if session._stop_flag.is_set():
+                    proc.kill()
+                    proc.wait()
+                    result.status = "skipped"
+                    result.label = "用户停止"
+                    result.stage_label = "已停止"
+                    result.exit_code = -998
+                    result.duration = time.time() - result._start_ts
+                    return
+                if proc.poll() is not None:
+                    break
+                if time.time() > deadline:
+                    proc.kill()
+                    proc.wait()
+                    result.log_lines.append(f"[GUI MODE] Timeout after {timeout}s.")
+                    result.status = "timeout"
+                    result.label = f"GUI 超时 ({timeout}s)"
+                    result.stage_label = "超时"
+                    result.exit_code = -999
+                    result.duration = time.time() - result._start_ts
+                    return
+                continue
+            if raw is None:
+                break
+            line = _decode_cli(raw).rstrip("\r\n")
+            result.log_lines.append(line)
+            session.live_log.append(line)
+
+        with session._proc_lock:
+            session._current_proc = None
+        proc.wait()
+        result.exit_code = proc.returncode
+        result.duration = time.time() - result._start_ts
+
+        # Detect new gcode files
+        gcodes_after = set(f.name for f in Path(out_dir).glob("*.gcode"))
+        new_gcodes = gcodes_after - gcodes_before
+
+        if new_gcodes or gcodes_after:
+            result.status = "success"
+            result.label = f"GUI 模式成功 (exit {result.exit_code})"
+            result.stage_label = "完成"
+            result.progress_pct = 100
+            result.log_lines.append(f"[GUI MODE] Found {len(gcodes_after)} G-code file(s).")
+        elif result.exit_code == 0:
+            result.status = "failed"
+            result.label = "GUI 退出但无 G-code (exit 0)"
+            result.stage_label = "无输出"
+            result.log_lines.append("[GUI MODE] Process exited 0 but no G-code found.")
+            result.suggestion = "请在 GUI 中点击切片按钮，然后关闭窗口。"
+        else:
+            result.status = "crashed" if result.exit_code < 0 else "failed"
+            result.label = f"GUI 崩溃 (exit {result.exit_code})"
+            result.stage_label = "崩溃"
+            result.log_lines.append(f"[GUI MODE] Process exited with code {result.exit_code}.")
+
+    except FileNotFoundError:
+        result.log_lines.append(f"[GUI ERROR] OrcaSlicer not found: {cli}")
+        result.duration = time.time() - result._start_ts
+        result.exit_code = -1
+        result.status = "failed"
+        result.label = "未找到 OrcaSlicer"
+        result.suggestion = "检查 CLI 路径设置。"
 
 
 def _do_slice_subprocess(result, config, out_dir):

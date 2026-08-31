@@ -198,15 +198,35 @@ h1{font-size:22px;font-weight:700;margin-bottom:2px}
         <button class="btn-browse" onclick="browse('dir','outputDir')">浏览</button>
       </div>
       <div class="advanced-toggle" onclick="toggleAdvanced()">高级选项</div>
-      <div id="advancedSection" class="advanced-section">
-        <div class="field-row">
-          <label>切片模式</label>
-          <select id="sliceMode">
-            <option value="0">所有盘 (0)</option>
-            <option value="1">Plate 1</option>
-            <option value="2">Plate 2</option>
-            <option value="3">Plate 3</option>
-          </select>
+     <div id="advancedSection" class="advanced-section">
+       <div class="field-row">
+         <label>切片引擎</label>
+         <select id="sliceEngine">
+           <option value="cli">CLI 模式（无界面，自动切片）</option>
+           <option value="gui">GUI 模式（启动完整界面，手动切片）</option>
+         </select>
+       </div>
+       <div class="field-row">
+         <label>切片模式</label>
+         <select id="sliceMode">
+           <option value="0">所有盘 (0)</option>
+           <option value="1">Plate 1</option>
+           <option value="2">Plate 2</option>
+           <option value="3">Plate 3</option>
+           <option value="4">Plate 4</option>
+           <option value="5">Plate 5</option>
+           <option value="6">Plate 6</option>
+           <option value="7">Plate 7</option>
+           <option value="8">Plate 8</option>
+           <option value="9">Plate 9</option>
+           <option value="10">Plate 10</option>
+           <option value="11">Plate 11</option>
+           <option value="12">Plate 12</option>
+           <option value="13">Plate 13</option>
+           <option value="14">Plate 14</option>
+           <option value="15">Plate 15</option>
+           <option value="16">Plate 16</option>
+         </select>
         </div>
         <div class="field-row">
           <label>每盘最大时间(秒)</label>
@@ -264,9 +284,13 @@ h1{font-size:22px;font-weight:700;margin-bottom:2px}
         <button class="btn btn-secondary" onclick="scanFiles()">扫描 3MF 文件</button>
         <span id="scanInfo" class="scan-info"></span>
       </div>
-      <div id="fileListContainer" class="hidden">
-        <div class="file-list" id="fileList"></div>
-      </div>
+     <div id="fileListContainer" class="hidden">
+       <div style="display:flex;gap:8px;margin:4px 0">
+         <button class="btn-sm btn-secondary" onclick="toggleAllFiles(true)">全选</button>
+         <button class="btn-sm btn-secondary" onclick="toggleAllFiles(false)">取消全选</button>
+       </div>
+       <div class="file-list" id="fileList"></div>
+     </div>
     </div>
   </div>
 
@@ -328,6 +352,9 @@ let lastQualityKey = '';
 
 function togglePanel(id) { document.getElementById(id).classList.toggle('collapsed'); }
 function toggleAdvanced() { document.getElementById('advancedSection').classList.toggle('show'); }
+function toggleAllFiles(checked) {
+  document.querySelectorAll('#fileList input[type=checkbox]').forEach(cb => { cb.checked = checked; });
+}
 function showError(msg) {
   const el = document.getElementById('errorBanner');
   const txt = document.getElementById('errorBannerText');
@@ -385,8 +412,9 @@ function getConfig() {
     cli_path: document.getElementById('cliPath').value.trim(),
     datadir: document.getElementById('datadir').value.trim(),
     output_dir: document.getElementById('outputDir').value.trim(),
-    slice_mode: parseInt(document.getElementById('sliceMode').value),
-    mstpp: parseInt(document.getElementById('mstpp').value),
+   slice_mode: parseInt(document.getElementById('sliceMode').value),
+   slice_engine: document.getElementById('sliceEngine').value,
+   mstpp: parseInt(document.getElementById('mstpp').value),
     mtcpp: parseInt(document.getElementById('mtcpp').value),
     debug: parseInt(document.getElementById('debugLevel').value),
     timeout: parseInt(document.getElementById('timeout').value),
