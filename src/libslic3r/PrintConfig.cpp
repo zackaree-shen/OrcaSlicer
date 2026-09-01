@@ -1631,7 +1631,7 @@ void PrintConfigDef::init_fff_params()
     def->sidetext = "mm";	// milimeters, don't need translation
     def->min = 0;
     def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(10));
+    def->set_default_value(new ConfigOptionFloat(0));
 
     def = this->add("machine_end_gcode", coString);
     def->label = L("End G-code");
