@@ -2317,7 +2317,10 @@ void TreeSupport::draw_circles()
                         // merge overhang to get a smoother interface surface.
                         // Only when overhang exists — circle nodes that descended through drop_nodes
                         // lose their overhang, so keep the grown circle to preserve transition connectivity.
-                        if (top_interface_layers > 0 && (node.support_roof_layers_below > 1 || (node.support_roof_layers_below >= 0 && !node.is_sharp_tail)) && !on_buildplate_only) {
+                        if (top_interface_layers > 0 && (node.support_roof_layers_below > 1 || (node.support_roof_layers_below >= 0 && !node.is_sharp_tail))) {
+                            // Port of Orca #13192: merging the overhang into the roof area keeps tree
+                            // tips producing a continuous support interface. Suppressing this for
+                            // build-plate-only support drops the roof polygons of valid branches.
                             ExPolygons overhang_expanded;
                             if (node.overhang.contour.size() > 100 || node.overhang.holes.size()>1)
                                 overhang_expanded.emplace_back(node.overhang);
@@ -2390,6 +2393,17 @@ void TreeSupport::draw_circles()
                     new_roofs.push_back(expoly);
                 }
                 roof_areas = std::move(new_roofs);
+
+                // Port of Orca #13192: build-plate-only pruning can collapse the roof stack
+                // down to a single printable layer. In that case still emit an interface
+                // layer instead of downgrading the last roof-adjacent layer to base support.
+                if (on_buildplate_only && top_interface_layers > 0 && roof_areas.empty() && !roof_1st_layer.empty()) {
+                    append(roof_areas, roof_1st_layer);
+                    roof_1st_layer.clear();
+                    max_layers_above_roof  = std::max(max_layers_above_roof, max_layers_above_roof1);
+                    max_layers_above_roof1 = 0;
+                    interface_id           = obj_layer_nr % top_interface_layers;
+                }
 
                 ExPolygons roofs; append(roofs, roof_1st_layer); append(roofs, roof_areas);append(roofs, roof_gap_areas);
                 base_areas = diff_ex(base_areas, ClipperUtils::clip_clipper_polygons_with_subject_bbox(roofs, get_extents(base_areas)));
@@ -3181,8 +3195,17 @@ void TreeSupport::drop_nodes()
                     }
                 }
                 // move to the averaged direction of neighbor center and contour edge if they are roughly same direction
-                Point movement;
-                if (!is_strong)
+                Point movement(0, 0);
+                if (support_on_buildplate_only)
+                    // Under build-plate-only an escape run must not lose speed to neighbour
+                    // convergence: the avoidance cone grows at max_move per layer, so any
+                    // lateral component lets a flaring wall catch the branch and the whole
+                    // chain is pruned. Push purely outward while an escape direction exists
+                    // (pre-a78168c2e8 behaviour, same as the strong blend); converge only
+                    // when safely outside the avoidance.
+                    movement = (dist2_to_outer > EPSILON) ? normal(direction_to_outer, scale_(get_max_move_dist(&node)))
+                                                          : move_to_neighbor_center;
+                else if (!is_strong)
                     movement = move_to_neighbor_center*2 + (dist2_to_outer > EPSILON ? direction_to_outer * (1 / dist2_to_outer) : Point(0, 0));
                 else {
                     if (movement.dot(move_to_neighbor_center) >= 0.2 || move_to_neighbor_center == Point(0, 0))
@@ -3229,6 +3252,16 @@ void TreeSupport::drop_nodes()
                 m_ts_data->m_mutex.unlock();
             }
             );
+        }
+
+        // Port of Bambu 851e982b: the loop above skips layer 0, so a node that only flips
+        // to_buildplate at layer 0 would be drawn resting on the model despite
+        // build-plate-only being enabled. Drop it with the rest of the failed leaves.
+        if (layer_nr_next == 0 && support_on_buildplate_only && !contact_nodes[layer_nr_next].empty()) {
+            for (SupportNode* node : contact_nodes[layer_nr_next]) {
+                if (!node->to_buildplate)
+                    unsupported_branch_leaves.push_front({ size_t(layer_nr_next), node });
+            }
         }
 
 #ifdef SUPPORT_TREE_DEBUG_TO_SVG
