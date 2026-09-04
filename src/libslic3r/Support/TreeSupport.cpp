@@ -2840,12 +2840,14 @@ void TreeSupport::drop_nodes()
                 Point movement = Point(0, 0);
                 if (support_on_buildplate_only)
                     movement = move_to_neighbor_center + direction_to_outer * 2;
-                else if (!is_strong)
-                    movement = move_to_neighbor_center*2 + (dist2_to_outer > EPSILON ? direction_to_outer * (1 / dist2_to_outer) : Point(0, 0));
                 else {
                     // The dot() reads movement before any assignment in the ported BambuStudio code too; zero
-                    // initializing it keeps that check deterministic (always false), so a strong-tree branch
-                    // follows the neighbor center whenever one exists and only a lone branch falls outward.
+                    // initializing it keeps that check deterministic (always false), so a branch follows the
+                    // neighbor center whenever one exists and only a lone branch falls outward.
+                    // Deliberate deviation from BambuStudio 976b5062c: upstream keeps a blended outward
+                    // escape term for the non-strong styles whose weight (1/dist2_to_outer) dominates once a
+                    // branch grazes a wall, which still walks slim/hybrid branches out of cavities. Pin every
+                    // 2D tree style to the neighbor-center skeleton the same way strong trees already are.
                     if (movement.dot(move_to_neighbor_center) >= 0.2 || move_to_neighbor_center == Point(0, 0))
                         movement = direction_to_outer + move_to_neighbor_center;
                     else
