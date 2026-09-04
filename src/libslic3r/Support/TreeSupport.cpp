@@ -2838,9 +2838,19 @@ void TreeSupport::drop_nodes()
                 }
                 // move to the averaged direction of neighbor center and contour edge if they are roughly same direction
                 Point movement = Point(0, 0);
-                if (support_on_buildplate_only)
-                    movement = move_to_neighbor_center + direction_to_outer * 2;
-                else {
+                if (support_on_buildplate_only) {
+                    // With "support on build plate only" a branch has to reach the plate or its whole area goes
+                    // unsupported, so keep the pre-port escape semantics at full speed: outward when touching the
+                    // avoidance area, otherwise converge to the neighbor center. The blended movement that
+                    // replaced this elsewhere moves non-colliding nodes by the raw neighbor vector, which is far
+                    // slower and let branches die on top of closed cavities instead of escaping them.
+                    if (node.is_sharp_tail && node.dist_mm_to_top < 3)
+                        movement = normal(node.skin_direction, scale_(get_max_move_dist(&node)));
+                    else if (dist2_to_outer > 0)
+                        movement = normal(direction_to_outer, scale_(get_max_move_dist(&node)));
+                    else
+                        movement = normal(move_to_neighbor_center, scale_(get_max_move_dist(&node)));
+                } else {
                     // The dot() reads movement before any assignment in the ported BambuStudio code too; zero
                     // initializing it keeps that check deterministic (always false), so a branch follows the
                     // neighbor center whenever one exists and only a lone branch falls outward.
