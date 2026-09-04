@@ -3463,11 +3463,18 @@ static void generate_support_areas(Print &print, TreeSupport* tree_support, cons
         const int       num_raft_layers = int(config.raft_layers.size());
         const int       num_layers = int(print_object.layer_count()) + num_raft_layers;
         overhangs.resize(num_layers);
+        // Iterate loverhangs_with_type rather than loverhangs: only the former carries the
+        // detect_overhangs type flags. Expand exactly the pure sharp-tail entries (2.3.6
+        // semantics: only entries that are solely sharp tails got the offset); cluster
+        // entries that merely carry the SharpTail bit stay unexpanded, their geometry
+        // enters expanded through the standalone sharp-tail entry instead. Without the
+        // expansion the xy-distance erosion of the collision/avoidance volumes downstream
+        // swallows thin floating tips. (Aligned with Bambu Studio.)
         for (size_t i = 0; i < print_object.layer_count(); i++) {
-            for (ExPolygon& expoly : print_object.get_layer(i)->loverhangs) {
-                Polygons polys = to_polygons(expoly);
-                if (tree_support->overhang_types[&expoly] == TreeSupport::SharpTail) { polys = offset(polys, scale_(0.2));
-                }
+            for (const std::pair<ExPolygon, int>& overhang_with_type : print_object.get_layer(i)->loverhangs_with_type) {
+                Polygons polys = to_polygons(overhang_with_type.first);
+                if (overhang_with_type.second == TreeSupport::SharpTail)
+                    polys = offset(polys, scale_(0.2));
                 append(overhangs[i + num_raft_layers], polys);
             }
         }
