@@ -2433,8 +2433,9 @@ void TreeSupport::drop_nodes()
     SupportNode::diameter_angle_scale_factor = diameter_angle_scale_factor;
     // Ported from BambuStudio d61ebefa2: bottom expansion grows branch radius in the first
     // DO_NOT_MOVER_UNDER_MM above the bed so tree bases fill cavities/grooves instead of spilling
-    // out of them. Enabled only when the wall count is auto (<0) or dual-wall (>1) is requested.
-    const bool bottom_expand_enabled = config.tree_support_wall_count > 1 || config.tree_support_wall_count < 0;
+    // out of them. Bambu gates it on wall_count > 1 || < 0 (their auto is -1); here the range is
+    // [0,2] with 0 meaning auto, so the gate is every value except an explicit single wall.
+    const bool bottom_expand_enabled = config.tree_support_wall_count != 1;
 
     auto get_max_move_dist = [this, &config, tan_angle, wall_count, support_extrusion_width](const SupportNode *node, int power = 1) {
         if (node->max_move_dist == 0) {
@@ -2810,6 +2811,12 @@ void TreeSupport::drop_nodes()
 
                 Point  to_outside         = projection_onto(avoidance_next, node.position);
                 Point  direction_to_outer = to_outside - node.position;
+                // Ported from BambuStudio 976b5062c: a sharp tail within 3 mm of its tip steers both
+                // directions along the skin, so the tip keeps growing down the slanted surface
+                // instead of being flung to the avoidance border.
+                if (node.skin_direction != Point(0, 0) && node.dist_mm_to_top < 3) {
+                    direction_to_outer = move_to_neighbor_center = normal(node.skin_direction, scale_(max_move_distance));
+                }
                 double dist2_to_outer     = vsize2_with_unscale(direction_to_outer);
                 // don't move if
                 // 1) line of node and to_outside is cut by contour (means supports may intersect with object)
@@ -2830,23 +2837,26 @@ void TreeSupport::drop_nodes()
                     }
                 }
                 // move to the averaged direction of neighbor center and contour edge if they are roughly same direction
-                Point movement;
-                if (!is_strong)
+                Point movement = Point(0, 0);
+                if (support_on_buildplate_only)
+                    movement = move_to_neighbor_center + direction_to_outer * 2;
+                else if (!is_strong)
                     movement = move_to_neighbor_center*2 + (dist2_to_outer > EPSILON ? direction_to_outer * (1 / dist2_to_outer) : Point(0, 0));
                 else {
+                    // The dot() reads movement before any assignment in the ported BambuStudio code too; zero
+                    // initializing it keeps that check deterministic (always false), so a strong-tree branch
+                    // follows the neighbor center whenever one exists and only a lone branch falls outward.
                     if (movement.dot(move_to_neighbor_center) >= 0.2 || move_to_neighbor_center == Point(0, 0))
                         movement = direction_to_outer + move_to_neighbor_center;
                     else
                         movement = move_to_neighbor_center; // otherwise move to neighbor center first
                 }
 
-                if (node.is_sharp_tail && node.dist_mm_to_top < 3) {
-                    movement = normal(node.skin_direction, scale_(get_max_move_dist(&node)));
-                }
-                else if (dist2_to_outer > 0)
-                    movement = normal(direction_to_outer, scale_(get_max_move_dist(&node)));
-                else
-                    movement = normal(move_to_neighbor_center, scale_(get_max_move_dist(&node)));
+                // Ported from BambuStudio 976b5062c: the previous override flung every node touching the
+                // avoidance area to its border at full speed, which walked strong-tree branches out of
+                // cavities until they escaped to the build plate. Keep the blended direction and only
+                // clamp it to the per-node move budget.
+                if (vsize2_with_unscale(movement) > get_max_move_dist(&node, 2)) movement = normal(movement, scale_(get_max_move_dist(&node)));
 
                 next_layer_vertex += movement;
 
