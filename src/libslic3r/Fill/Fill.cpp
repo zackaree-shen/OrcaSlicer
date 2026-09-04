@@ -1291,10 +1291,7 @@ void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
 			if(surface_fill.params.bridge && surface_fill.surface.is_external() && surface_fill.params.density > 99.0){
 				params.density = layerm->region().config().bridge_density.get_abs_value(1.0);
 				params.dont_adjust = true;
-				// Snapmaker: density >= 100% bridges switch to per-surface edge
-				// anchoring in FillRectilinear::fill_surface_by_lines. This is the
-				// only place bridge_edge_anchor is set; everything else (including
-				// bridges below 100%) keeps the vanilla global-grid behaviour.
+				// Snapmaker: >= 100% bridges switch to per-surface edge anchoring (only set site).
 				params.bridge_edge_anchor = params.density >= 0.999f;
 			}
             if(surface_fill.surface.is_internal_bridge()){
