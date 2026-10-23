@@ -2272,7 +2272,7 @@ Flow Print::skirt_flow() const
         frPerimeter,
         // Flow::new_from_config_width takes care of the percent to value substitution
 		width,
-		(float)m_config.nozzle_diameter.get_at(m_objects.front()->config().support_filament-1),
+		(float)m_config.nozzle_diameter.get_at(std::max<int>(m_objects.front()->config().support_filament - 1, 0)),
 		(float)this->skirt_first_layer_height());
 }
 
